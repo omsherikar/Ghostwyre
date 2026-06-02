@@ -9,10 +9,16 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
-from app.db.models import BatchStatus, Draft, DraftBatch, DraftStatus
-from app.slack.blocks import build_draft_blocks, fallback_text
+from app.db.models import ApprovalAction, ApprovalEvent, BatchStatus, Draft, DraftBatch, DraftStatus
+from app.slack.blocks import (
+    build_draft_blocks,
+    build_history_blocks,
+    fallback_text,
+    history_fallback,
+)
 
 
 def _draft(slot: int, text: str, status: DraftStatus = DraftStatus.pending) -> Draft:
@@ -169,3 +175,60 @@ def test_fallback_text_is_nonempty_string_with_count() -> None:
     assert isinstance(text, str)
     assert text.strip()
     assert "2" in text
+
+
+# --- history renderer ------------------------------------------------------- #
+
+
+def _event(
+    text: str | None,
+    *,
+    url: str | None = "https://x.test/1",
+    channel: str = "C12345",
+    when: datetime | None = None,
+) -> ApprovalEvent:
+    draft = _draft(0, text) if text is not None else None
+    return ApprovalEvent(
+        id=uuid.uuid4(),
+        action=ApprovalAction.approve,
+        slack_user_id="U999",
+        publish_url=url,
+        created_at=when or datetime(2026, 6, 1, 12, 0, tzinfo=UTC),
+        draft=draft,
+        batch=_batch([], channel=channel),
+    )
+
+
+def test_history_renders_posts_newest_first_with_links() -> None:
+    e_new = _event("second post", url="https://x.test/2")
+    e_old = _event("first post", url="https://x.test/1")
+    rendered = _rendered_text(build_history_blocks([e_new, e_old], []))
+    assert "second post" in rendered and "first post" in rendered
+    assert "https://x.test/2" in rendered and "https://x.test/1" in rendered
+    # order is preserved as given (caller passes newest-first)
+    assert rendered.index("second post") < rendered.index("first post")
+
+
+def test_history_warns_about_unconfirmed_only_when_present() -> None:
+    published = [_event("a post")]
+    with_warning = _rendered_text(build_history_blocks(published, [_batch([])]))
+    assert "couldn't be confirmed" in with_warning
+
+    without_warning = _rendered_text(build_history_blocks(published, []))
+    assert "couldn't be confirmed" not in without_warning
+
+
+def test_history_empty_state() -> None:
+    rendered = _rendered_text(build_history_blocks([], []))
+    assert "No published posts yet" in rendered
+
+
+def test_history_missing_draft_renders_placeholder() -> None:
+    rendered = _rendered_text(build_history_blocks([_event(None)], []))
+    assert "text unavailable" in rendered
+
+
+def test_history_fallback_wording() -> None:
+    assert "no published posts" in history_fallback(0).lower()
+    assert "1" in history_fallback(1)
+    assert "3" in history_fallback(3)

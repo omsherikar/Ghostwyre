@@ -14,7 +14,10 @@ Fakes are hand-rolled (no unittest.mock) to match the house style.
 
 from __future__ import annotations
 
+import json
 import uuid
+from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -345,3 +348,78 @@ async def test_not_in_channel_responds_with_invite(monkeypatch: pytest.MonkeyPat
     # We attempted the post (so create_batch ran first), but never set the ts.
     assert "create_batch" in rec.calls
     assert "set_batch_message_ts" not in rec.calls
+
+
+# --------------------------------------------------------------------------- #
+# /post-history
+# --------------------------------------------------------------------------- #
+
+
+class HistoryRespond:
+    """Captures respond(**kwargs) calls (blocks + text)."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def __call__(self, **kwargs: Any) -> None:
+        self.calls.append(kwargs)
+
+
+def _fake_published(text: str, url: str) -> SimpleNamespace:
+    """Duck-typed stand-in for an eager-loaded ApprovalEvent (renderer reads attrs)."""
+    return SimpleNamespace(
+        draft=SimpleNamespace(text=text),
+        publish_url=url,
+        created_at=datetime(2026, 6, 1, 12, 0, tzinfo=UTC),
+        batch=SimpleNamespace(slack_channel_id=CHANNEL),
+    )
+
+
+async def _run_history(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    published: list[Any],
+    unconfirmed: list[Any],
+) -> HistoryRespond:
+    monkeypatch.setattr(commands, "SessionLocal", fake_sessionmaker)
+
+    async def fake_list_published(session: Any, *, limit: int) -> list[Any]:
+        return published
+
+    async def fake_list_unconfirmed(session: Any) -> list[Any]:
+        return unconfirmed
+
+    monkeypatch.setattr(repo, "list_published", fake_list_published)
+    monkeypatch.setattr(repo, "list_unconfirmed_approved", fake_list_unconfirmed)
+
+    fake_app = FakeApp()
+    register(fake_app)  # type: ignore[arg-type]
+    respond = HistoryRespond()
+    await fake_app.callbacks["/post-history"](ack=_ack, respond=respond)
+    return respond
+
+
+@pytest.mark.asyncio
+async def test_post_history_renders_published_and_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    respond = await _run_history(
+        monkeypatch,
+        published=[_fake_published("hello post", "https://x.test/1")],
+        unconfirmed=[SimpleNamespace()],
+    )
+    assert len(respond.calls) == 1
+    call = respond.calls[0]
+    assert isinstance(call["text"], str) and call["text"]
+    rendered = json.dumps(call["blocks"])
+    assert "hello post" in rendered
+    assert "https://x.test/1" in rendered
+    assert "couldn't be confirmed" in rendered
+
+
+@pytest.mark.asyncio
+async def test_post_history_empty_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    respond = await _run_history(monkeypatch, published=[], unconfirmed=[])
+    assert len(respond.calls) == 1
+    rendered = json.dumps(respond.calls[0]["blocks"])
+    assert "No published posts yet" in rendered

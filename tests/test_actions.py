@@ -90,6 +90,21 @@ class FailingClient:
         raise RuntimeError("slack down")
 
 
+class FailOnNthClient:
+    """chat_update succeeds until the nth call, which raises — simulates a Slack
+    failure on the FINAL render after the DB writes already committed."""
+
+    def __init__(self, *, n: int) -> None:
+        self.updates: list[dict[str, Any]] = []
+        self._n = n
+
+    async def chat_update(self, **kwargs: Any) -> dict[str, Any]:
+        self.updates.append(kwargs)
+        if len(self.updates) >= self._n:
+            raise RuntimeError("slack down")
+        return {}
+
+
 class FakeLogger:
     """No-op structlog-shaped logger."""
 
@@ -542,3 +557,63 @@ async def test_bad_uuid_button_friendly_update(
     assert client.updates
     rendered = json.dumps(client.updates[-1]["blocks"]).lower()
     assert "couldn't read" in rendered or "couldn’t read" in rendered
+
+
+@_db_test
+@_db_loop
+async def test_regenerate_chat_update_failure_persists(
+    monkeypatch: pytest.MonkeyPatch,
+    test_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    monkeypatch.setattr(actions, "SessionLocal", test_sessionmaker)
+
+    async def fake_generate(*args: Any, **kwargs: Any) -> ContentResult:
+        return ContentResult(
+            postworthy=True, drafts=[Draft(text="fresh-zero"), Draft(text="fresh-one")]
+        )
+
+    monkeypatch.setattr(actions, "generate_post_drafts", fake_generate)
+    fake_app = FakeApp()
+    register(fake_app)  # type: ignore[arg-type]
+    callbacks = fake_app.callbacks
+
+    batch_id, draft_ids = await _seed_pending_batch(
+        test_sessionmaker, draft_texts=["old-zero", "old-one"]
+    )
+    value = json.dumps({"b": str(batch_id), "d": str(draft_ids[0])})
+
+    # Interim update succeeds; the FINAL render fails — but replace_drafts/record_event
+    # committed before it, so the regenerate persists (chat_update is outside the txn).
+    with pytest.raises(RuntimeError):
+        await _invoke(callbacks, "regenerate_draft", value=value, client=FailOnNthClient(n=2))
+
+    async with test_sessionmaker() as session:
+        loaded = await repo.get_batch(session, batch_id)
+        assert loaded is not None
+        assert [d.text for d in loaded.drafts] == ["fresh-zero", "fresh-one"]
+        assert any(e.action is ApprovalAction.regenerate for e in loaded.events)
+
+
+@_db_test
+@_db_loop
+async def test_cancel_chat_update_failure_persists(
+    monkeypatch: pytest.MonkeyPatch,
+    test_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    monkeypatch.setattr(actions, "SessionLocal", test_sessionmaker)
+    fake_app = FakeApp()
+    register(fake_app)  # type: ignore[arg-type]
+    callbacks = fake_app.callbacks
+
+    batch_id, _ = await _seed_pending_batch(test_sessionmaker, draft_texts=["a", "b"])
+    value = json.dumps({"b": str(batch_id)})
+
+    # The single (final) chat_update fails, but the cancel committed before it.
+    with pytest.raises(RuntimeError):
+        await _invoke(callbacks, "cancel_batch", value=value, client=FailingClient())
+
+    async with test_sessionmaker() as session:
+        loaded = await repo.get_batch(session, batch_id)
+        assert loaded is not None
+        assert loaded.status is BatchStatus.cancelled
+        assert any(e.action is ApprovalAction.cancel for e in loaded.events)
