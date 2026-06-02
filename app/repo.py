@@ -13,8 +13,9 @@ never place it in a Slack button value.
 from __future__ import annotations
 
 import uuid
+from typing import Any, cast
 
-from sqlalchemy import delete, select
+from sqlalchemy import CursorResult, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -149,6 +150,30 @@ async def set_batch_status(
         raise LookupError(f"DraftBatch {batch_id} not found")
     batch.status = status
     await session.flush()
+
+
+async def claim_for_publish(session: AsyncSession, batch_id: uuid.UUID) -> bool:
+    """Atomically claim a pending batch for publishing (CAS pending -> approved).
+
+    Returns True iff this call won the claim (exactly one row transitioned).
+    The Approve handler calls this and commits BEFORE the network publish, so a
+    concurrent double-click or Slack retry that arrives afterwards loses the CAS
+    and can never publish a second time — the at-most-once guarantee.
+
+    This is the one writer that uses a Core UPDATE instead of ORM attribute
+    assignment (the WHERE clause has to match atomically), so it must stamp
+    updated_at by hand — onupdate=func.now() only fires for ORM unit-of-work
+    flushes, not Core statements.
+    """
+    result = await session.execute(
+        update(DraftBatch)
+        .where(DraftBatch.id == batch_id, DraftBatch.status == BatchStatus.pending)
+        .values(status=BatchStatus.approved, updated_at=func.now())
+    )
+    await session.flush()
+    # session.execute() is typed Result[Any]; a Core UPDATE yields a CursorResult
+    # whose rowcount tells us whether the CAS matched a pending row.
+    return cast("CursorResult[Any]", result).rowcount == 1
 
 
 async def record_event(
