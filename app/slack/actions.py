@@ -34,7 +34,12 @@ from app.db.models import ApprovalAction, BatchStatus, DraftBatch, DraftStatus
 from app.logging import get_logger
 from app.services.content import generate_post_drafts, load_voice
 from app.services.llm import build_client
-from app.services.publisher import PublisherClient, PublishError, get_publisher
+from app.services.publisher import (
+    PublisherClient,
+    PublishError,
+    PublishUnknownError,
+    get_publisher,
+)
 from app.slack.blocks import build_draft_blocks, fallback_text
 
 logger = get_logger(__name__)
@@ -69,6 +74,11 @@ def _recover_batch_id(action: dict[str, Any]) -> str | None:
 def _notice_blocks(mrkdwn: str) -> list[dict[str, Any]]:
     """A single-section, button-free notice card."""
     return [{"type": "section", "text": {"type": "mrkdwn", "text": mrkdwn}}]
+
+
+def _context_line(mrkdwn: str) -> dict[str, Any]:
+    """A context block appended to a rebuilt card to show a status line."""
+    return {"type": "context", "elements": [{"type": "mrkdwn", "text": mrkdwn}]}
 
 
 def _regenerating_blocks(batch: DraftBatch) -> list[dict[str, Any]]:
@@ -133,6 +143,11 @@ def register(app: AsyncApp) -> None:
             )
             return
 
+        user_id = body["user"]["id"]
+
+        # Txn 1: validate + ATOMICALLY claim the batch (status -> approved) BEFORE
+        # any network call. Capture the draft text as a primitive — never re-render
+        # off these ORM objects once the session closes.
         async with SessionLocal() as session:
             async with session.begin():
                 batch = await repo.get_batch(session, b)
@@ -143,7 +158,7 @@ def register(app: AsyncApp) -> None:
                         )
                     return
 
-                draft = await repo.get_draft(session, d)
+                draft = next((dr for dr in batch.drafts if dr.id == d), None)
                 if draft is None:
                     await _update_card(
                         client,
@@ -153,52 +168,78 @@ def register(app: AsyncApp) -> None:
                     )
                     return
 
-                publisher = _publisher
-                assert publisher is not None  # set in register()
-                try:
-                    result = await publisher.publish(draft.text)
-                except PublishError as exc:
-                    # Keep the batch pending; do NOT mark approved or record a url.
-                    blocks = build_draft_blocks(batch)
-                    blocks.append(
-                        {
-                            "type": "context",
-                            "elements": [
-                                {
-                                    "type": "mrkdwn",
-                                    "text": f"⚠️ Couldn't publish: {exc}. Try Regenerate.",
-                                }
-                            ],
-                        }
-                    )
-                    await _update_card(client, batch, blocks, "Ghostwyre: couldn't publish.")
-                    return
+                draft_text = draft.text
+                claimed = await repo.claim_for_publish(session, b)
 
+        if not claimed:
+            # Lost the claim to a concurrent click / Slack retry — re-render only.
+            async with SessionLocal() as session:
+                batch = await repo.get_batch(session, b)
+            if batch is not None:
+                await _update_card(client, batch, build_draft_blocks(batch), fallback_text(batch))
+            return
+
+        # Publish OUTSIDE any transaction. The batch is already 'approved', so a
+        # failed chat_update below can no longer roll the status back: a re-click
+        # re-renders instead of republishing (the at-most-once gate).
+        publisher = _publisher
+        assert publisher is not None  # set in register()
+        try:
+            result = await publisher.publish(draft_text)
+        except PublishError as exc:
+            # Definite failure — nothing was posted. Revert the claim so the card
+            # re-arms and the user can retry or Regenerate.
+            async with SessionLocal() as session:
+                async with session.begin():
+                    await repo.set_batch_status(session, b, BatchStatus.pending)
+                    await repo.set_draft_status(session, d, DraftStatus.pending)
+                batch = await repo.get_batch(session, b)
+            if batch is not None:
+                blocks = build_draft_blocks(batch)
+                blocks.append(_context_line(f"⚠️ Couldn't publish: {exc}. Try Regenerate."))
+                await _update_card(client, batch, blocks, "Ghostwyre: couldn't publish.")
+            logger.info("approve_publish_failed", batch_id=str(b))
+            return
+        except PublishUnknownError as exc:
+            # Ambiguous — the post may exist. Leave the batch 'approved' (do NOT
+            # re-arm; that risks a double-post) and record an audit row with no url.
+            async with SessionLocal() as session:
+                async with session.begin():
+                    await repo.set_draft_status(session, d, DraftStatus.approved)
+                    await repo.record_event(
+                        session,
+                        batch_id=b,
+                        draft_id=d,
+                        action=ApprovalAction.approve,
+                        slack_user_id=user_id,
+                        publish_url=None,
+                    )
+                batch = await repo.get_batch(session, b)
+            if batch is not None:
+                blocks = build_draft_blocks(batch)
+                blocks.append(_context_line(f"⚠️ Publish status unknown. {exc}"))
+                await _update_card(client, batch, blocks, "Ghostwyre: publish status unknown.")
+            logger.warning("approve_publish_unknown", batch_id=str(b))
+            return
+
+        # Success — record the event and render the terminal card with the link.
+        async with SessionLocal() as session:
+            async with session.begin():
                 await repo.set_draft_status(session, d, DraftStatus.approved)
-                await repo.set_batch_status(session, b, BatchStatus.approved)
                 await repo.record_event(
                     session,
                     batch_id=b,
                     draft_id=d,
                     action=ApprovalAction.approve,
-                    slack_user_id=body["user"]["id"],
+                    slack_user_id=user_id,
                     publish_url=result.url,
                 )
-
-                batch = await repo.get_batch(session, b)
-                assert batch is not None
-                blocks = build_draft_blocks(batch)
-                run_label = "dry-run" if result.dry_run else "live"
-                blocks.append(
-                    {
-                        "type": "context",
-                        "elements": [
-                            {"type": "mrkdwn", "text": f"Published ({run_label}): {result.url}"}
-                        ],
-                    }
-                )
-                await _update_card(client, batch, blocks, fallback_text(batch))
-
+            batch = await repo.get_batch(session, b)
+        assert batch is not None
+        blocks = build_draft_blocks(batch)
+        run_label = "dry-run" if result.dry_run else "live"
+        blocks.append(_context_line(f"Published ({run_label}): {result.url}"))
+        await _update_card(client, batch, blocks, fallback_text(batch))
         logger.info("approve_published", batch_id=str(b), dry_run=result.dry_run)
 
     @app.action("regenerate_draft")

@@ -221,6 +221,29 @@ async def test_record_event_cancel_without_draft(session: AsyncSession) -> None:
     assert event.publish_url is None
 
 
+async def test_claim_for_publish_wins_once_then_loses(session: AsyncSession) -> None:
+    created = await repo.create_batch(
+        session,
+        channel_id=CHANNEL,
+        user_id=USER,
+        transcript=TRANSCRIPT,
+        draft_texts=["d"],
+    )
+
+    first = await repo.claim_for_publish(session, created.id)
+    second = await repo.claim_for_publish(session, created.id)
+
+    assert first is True  # CAS pending -> approved matched exactly one row
+    assert second is False  # already approved -> the WHERE no longer matches
+    loaded = await repo.get_batch(session, created.id)
+    assert loaded is not None
+    assert loaded.status is BatchStatus.approved
+
+
+async def test_claim_for_publish_unknown_id_returns_false(session: AsyncSession) -> None:
+    assert await repo.claim_for_publish(session, uuid.uuid4()) is False
+
+
 async def test_updated_at_advances_on_status_write(session: AsyncSession) -> None:
     created = await repo.create_batch(
         session,
