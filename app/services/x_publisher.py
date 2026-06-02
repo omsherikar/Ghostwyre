@@ -48,12 +48,17 @@ def build_client(settings: Settings) -> tweepy.Client:
     )
 
 
+def _is_duplicate(exc: Exception) -> bool:
+    """True if a 403 is X's duplicate-content rejection (the post may already exist)."""
+    return "duplicate" in str(exc).lower()
+
+
 def _definite_message(exc: Exception) -> str:
     """Human-readable Slack message for a definite (nothing-posted) failure."""
     if isinstance(exc, tweepy.Unauthorized):
         return "X rejected the credentials (auth failed). Check the X_* tokens."
     if isinstance(exc, tweepy.Forbidden):
-        return "X refused the post (possibly a duplicate or a policy violation)."
+        return "X refused the post (a permissions or policy problem)."
     if isinstance(exc, tweepy.NotFound):
         return "X endpoint not found."
     return "X rejected the post (bad request)."
@@ -71,7 +76,18 @@ class XPublisher:
         _validate(text)  # empty / >280 -> PublishError, before any network call
         try:
             resp = await asyncio.to_thread(self._client.create_tweet, text=text)
-        except (tweepy.BadRequest, tweepy.Unauthorized, tweepy.Forbidden, tweepy.NotFound) as exc:
+        except tweepy.Forbidden as exc:
+            # A 403 "duplicate content" means an identical tweet already exists on
+            # the account -> the content is (or may be) live. Treat as ambiguous
+            # rather than re-arming, which could create a near-duplicate. Other 403s
+            # (permissions/policy) are definite: nothing was posted.
+            if _is_duplicate(exc):
+                raise PublishUnknownError(
+                    "X rejected this as a duplicate — an identical post may already "
+                    "be live. Check X before retrying."
+                ) from exc
+            raise PublishError(_definite_message(exc)) from exc
+        except (tweepy.BadRequest, tweepy.Unauthorized, tweepy.NotFound) as exc:
             # 4xx received without creating the tweet -> definitely not posted.
             raise PublishError(_definite_message(exc)) from exc
         except (tweepy.TooManyRequests, tweepy.TwitterServerError) as exc:

@@ -97,6 +97,18 @@ async def test_ambiguous_failures_map_to_unknown(error: Exception) -> None:
         await XPublisher(fake).publish("a real post")
 
 
+async def test_duplicate_forbidden_maps_to_unknown() -> None:
+    # A 403 whose body says "duplicate" means the post may already be live -> the
+    # at-most-once gate must NOT re-arm, so this is ambiguous, not a definite fail.
+    dup = tweepy.Forbidden(
+        SimpleNamespace(status_code=403, reason="Forbidden"),
+        response_json={"errors": ["You are not allowed to create a Tweet with duplicate content."]},
+    )
+    fake = FakeTweepyClient(error=dup)
+    with pytest.raises(PublishUnknownError):
+        await XPublisher(fake).publish("a real post")
+
+
 def test_get_publisher_x_returns_xpublisher() -> None:
     settings = Settings(
         publisher="x",
