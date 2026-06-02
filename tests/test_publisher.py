@@ -32,6 +32,8 @@ def test_factory_defaults_to_dry_run() -> None:
     assert isinstance(get_publisher(Settings(publisher="dry")), DryRunPublisher)
 
 
-def test_factory_x_not_implemented_yet() -> None:
-    with pytest.raises(NotImplementedError):
+def test_factory_x_missing_creds_raises() -> None:
+    # PUBLISHER=x with no credentials fails fast (before any tweepy import) with a
+    # PublishError naming what's missing.
+    with pytest.raises(PublishError):
         get_publisher(Settings(publisher="x"))

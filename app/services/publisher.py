@@ -21,7 +21,16 @@ MAX_TWEET_LEN = 280
 
 
 class PublishError(Exception):
-    """Raised when a post cannot be published (oversized, auth, rate limit, …)."""
+    """Raised when a post definitely was NOT published (oversized, auth, bad
+    request, forbidden/duplicate). Safe for the caller to re-arm and retry —
+    nothing went out."""
+
+
+class PublishUnknownError(Exception):
+    """Raised when a publish attempt's outcome is UNKNOWN (rate limit, server
+    error, network/timeout) — the post may or may not exist. The caller must NOT
+    auto-retry (that risks a double-post); it should surface the ambiguity and
+    leave the batch claimed."""
 
 
 @dataclass(frozen=True)
@@ -53,12 +62,33 @@ class DryRunPublisher:
 def get_publisher(settings: Settings) -> PublisherClient:
     """Factory: returns the configured publisher.
 
-    The `x` branch is intentionally not implemented yet — it ships in Phase 4
-    once the X Basic tier exists. Until then `PUBLISHER=dry` is the only path.
+    `PUBLISHER=dry` (default) returns the no-network `DryRunPublisher`.
+    `PUBLISHER=x` returns the real `XPublisher` — but only if all four X
+    credentials are set and the `x` extra (tweepy) is installed; otherwise a
+    `PublishError` explains exactly what's missing. tweepy is imported lazily so
+    the dry path never requires the optional dependency.
     """
     if settings.publisher == "x":
-        raise NotImplementedError(
-            "XPublisher is not implemented yet (Phase 4). Set PUBLISHER=dry, "
-            "or provision the X Basic tier and add the XPublisher implementation."
-        )
+        missing = [
+            name
+            for name, value in (
+                ("X_API_KEY", settings.x_api_key),
+                ("X_API_SECRET", settings.x_api_secret),
+                ("X_ACCESS_TOKEN", settings.x_access_token),
+                ("X_ACCESS_TOKEN_SECRET", settings.x_access_token_secret),
+            )
+            if not value
+        ]
+        if missing:
+            raise PublishError(
+                "PUBLISHER=x but these credentials are missing: " + ", ".join(missing) + "."
+            )
+        try:
+            from app.services.x_publisher import XPublisher, build_client
+        except ModuleNotFoundError as exc:  # the `x` extra (tweepy) isn't installed
+            raise PublishError(
+                "PUBLISHER=x requires the `x` extra: `uv sync --extra x` "
+                "(or `pip install ghostwyre[x]`)."
+            ) from exc
+        return XPublisher(build_client(settings))
     return DryRunPublisher()
