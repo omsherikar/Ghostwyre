@@ -9,8 +9,13 @@ is unit-testable against canned payloads with no network.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
+
+from app.logging import get_logger
+
+logger = get_logger(__name__)
 
 # conversations.history returns dicts; alias for readability.
 RawMessage = dict[str, Any]
@@ -88,6 +93,50 @@ def to_transcript(
             )
         )
     return "\n".join(f"{c.user}: {c.text}" for c in cleaned if c.text)
+
+
+def unique_user_ids(messages: list[RawMessage]) -> list[str]:
+    """Return the unique, non-empty `user` ids in *messages*, order-preserving."""
+    seen: dict[str, None] = {}
+    for m in messages:
+        user = m.get("user")
+        if user:
+            seen.setdefault(str(user), None)
+    return list(seen)
+
+
+def _best_name(profile_resp: dict[str, Any], user_id: str) -> str:
+    """Pick the best display name from a users.info response, falling back to id."""
+    user = profile_resp.get("user") or {}
+    profile = user.get("profile") or {}
+    display = (profile.get("display_name") or "").strip()
+    if display:
+        return display
+    real = (profile.get("real_name") or "").strip()
+    if real:
+        return real
+    name = (user.get("name") or "").strip()
+    if name:
+        return name
+    return user_id
+
+
+async def resolve_user_names(client: Any, user_ids: Iterable[str]) -> dict[str, str]:
+    """Resolve Slack user ids to display names via users.info.
+
+    De-duplicates ids before calling. For each id, prefers the profile's
+    `display_name`, then `real_name`, then `name`, then the id itself. A failed
+    lookup for one id falls back to that id and never breaks the batch.
+    """
+    names: dict[str, str] = {}
+    for user_id in dict.fromkeys(user_ids):
+        try:
+            resp = await client.users_info(user=user_id)
+            names[user_id] = _best_name(dict(resp), user_id)
+        except Exception:  # noqa: BLE001 — one bad lookup must not break the batch
+            logger.warning("resolve_user_name_failed", user_id=user_id)
+            names[user_id] = user_id
+    return names
 
 
 async def fetch_recent_messages(client: Any, channel: str, limit: int) -> list[RawMessage]:
