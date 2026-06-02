@@ -105,19 +105,6 @@ class FailOnNthClient:
         return {}
 
 
-class FakeLogger:
-    """No-op structlog-shaped logger."""
-
-    def info(self, *args: Any, **kwargs: Any) -> None:
-        pass
-
-    def warning(self, *args: Any, **kwargs: Any) -> None:
-        pass
-
-    def exception(self, *args: Any, **kwargs: Any) -> None:
-        pass
-
-
 async def _ack() -> None:
     return None
 
@@ -204,7 +191,6 @@ async def _invoke(
         body=_body(user_id),
         action=_action(value, block_id),
         client=client,
-        logger=FakeLogger(),
     )
 
 

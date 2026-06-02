@@ -117,7 +117,7 @@ def register(app: AsyncApp) -> None:
 
     @app.action("approve_draft")
     async def approve_draft(
-        ack: Any, body: dict[str, Any], action: dict[str, Any], client: Any, logger: Any
+        ack: Any, body: dict[str, Any], action: dict[str, Any], client: Any
     ) -> None:
         await ack()  # FIRST — Slack times out at 3s.
 
@@ -244,7 +244,7 @@ def register(app: AsyncApp) -> None:
 
     @app.action("regenerate_draft")
     async def regenerate_draft(
-        ack: Any, body: dict[str, Any], action: dict[str, Any], client: Any, logger: Any
+        ack: Any, body: dict[str, Any], action: dict[str, Any], client: Any
     ) -> None:
         await ack()  # FIRST.
 
@@ -332,7 +332,7 @@ def register(app: AsyncApp) -> None:
 
     @app.action("cancel_batch")
     async def cancel_batch(
-        ack: Any, body: dict[str, Any], action: dict[str, Any], client: Any, logger: Any
+        ack: Any, body: dict[str, Any], action: dict[str, Any], client: Any
     ) -> None:
         await ack()  # FIRST.
 
