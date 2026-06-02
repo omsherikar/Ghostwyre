@@ -269,55 +269,53 @@ def register(app: AsyncApp) -> None:
             )
             return
 
+        # Read + guard (no writes). Re-render of a terminal batch happens outside.
+        async with SessionLocal() as session:
+            batch = await repo.get_batch(session, b)
+        if batch is None or batch.status != BatchStatus.pending:
+            if batch is not None:
+                await _update_card(client, batch, build_draft_blocks(batch), fallback_text(batch))
+            return
+        transcript = batch.transcript  # CONFIDENTIAL — never logged.
+
+        # Interim feedback (no transaction held) so the user can't double-fire.
+        await _update_card(
+            client, batch, _regenerating_blocks(batch), "Ghostwyre: regenerating drafts…"
+        )
+
+        # The LLM call runs with no DB transaction open.
+        try:
+            result = await generate_post_drafts(
+                transcript, voice, client=anthropic_client, settings=settings
+            )
+        except Exception:
+            logger.exception("regenerate_failed", batch_id=str(b))
+            async with SessionLocal() as session:
+                batch = await repo.get_batch(session, b)
+            if batch is not None:
+                blocks = build_draft_blocks(batch)
+                blocks.append(_context_line("⚠️ Regenerate failed — original drafts kept."))
+                await _update_card(client, batch, blocks, "Ghostwyre: regenerate failed.")
+            return
+
+        if not result.postworthy:
+            async with SessionLocal() as session:
+                batch = await repo.get_batch(session, b)
+            if batch is not None:
+                await _update_card(
+                    client,
+                    batch,
+                    _notice_blocks(
+                        "Nothing here looks postworthy on a re-read — "
+                        "the original drafts are kept. Run `/draft-post` after more discussion."
+                    ),
+                    "Ghostwyre: nothing postworthy.",
+                )
+            return
+
+        # Swap the drafts + record the event in one short transaction, THEN render.
         async with SessionLocal() as session:
             async with session.begin():
-                batch = await repo.get_batch(session, b)
-                if batch is None or batch.status != BatchStatus.pending:
-                    if batch is not None:
-                        await _update_card(
-                            client, batch, build_draft_blocks(batch), fallback_text(batch)
-                        )
-                    return
-
-                # Interim feedback so the user can't double-fire.
-                await _update_card(
-                    client, batch, _regenerating_blocks(batch), "Ghostwyre: regenerating drafts…"
-                )
-
-                transcript = batch.transcript  # CONFIDENTIAL — never logged.
-                try:
-                    result = await generate_post_drafts(
-                        transcript, voice, client=anthropic_client, settings=settings
-                    )
-                except Exception:
-                    logger.exception("regenerate_failed", batch_id=str(b))
-                    blocks = build_draft_blocks(batch)
-                    blocks.append(
-                        {
-                            "type": "context",
-                            "elements": [
-                                {
-                                    "type": "mrkdwn",
-                                    "text": "⚠️ Regenerate failed — original drafts kept.",
-                                }
-                            ],
-                        }
-                    )
-                    await _update_card(client, batch, blocks, "Ghostwyre: regenerate failed.")
-                    return
-
-                if not result.postworthy:
-                    await _update_card(
-                        client,
-                        batch,
-                        _notice_blocks(
-                            "Nothing here looks postworthy on a re-read — "
-                            "the original drafts are kept. Run `/draft-post` after more discussion."
-                        ),
-                        "Ghostwyre: nothing postworthy.",
-                    )
-                    return
-
                 await repo.replace_drafts(session, b, [d.text for d in result.drafts])
                 await repo.record_event(
                     session,
@@ -326,11 +324,10 @@ def register(app: AsyncApp) -> None:
                     action=ApprovalAction.regenerate,
                     slack_user_id=body["user"]["id"],
                 )
+            batch = await repo.get_batch(session, b)
 
-                batch = await repo.get_batch(session, b)
-                assert batch is not None
-                await _update_card(client, batch, build_draft_blocks(batch), fallback_text(batch))
-
+        if batch is not None:
+            await _update_card(client, batch, build_draft_blocks(batch), fallback_text(batch))
         logger.info("regenerate_done", batch_id=str(b), draft_count=len(result.drafts))
 
     @app.action("cancel_batch")
@@ -360,28 +357,24 @@ def register(app: AsyncApp) -> None:
             )
             return
 
+        # Mark cancelled in one short transaction, THEN render outside it (a failed
+        # chat_update can't roll the cancel back). A non-pending batch just re-renders.
         async with SessionLocal() as session:
             async with session.begin():
                 batch = await repo.get_batch(session, b)
                 if batch is None:
                     return
-                if batch.status != BatchStatus.pending:
-                    await _update_card(
-                        client, batch, build_draft_blocks(batch), fallback_text(batch)
+                if batch.status == BatchStatus.pending:
+                    await repo.set_batch_status(session, b, BatchStatus.cancelled)
+                    await repo.record_event(
+                        session,
+                        batch_id=b,
+                        draft_id=None,
+                        action=ApprovalAction.cancel,
+                        slack_user_id=body["user"]["id"],
                     )
-                    return
+            batch = await repo.get_batch(session, b)
 
-                await repo.set_batch_status(session, b, BatchStatus.cancelled)
-                await repo.record_event(
-                    session,
-                    batch_id=b,
-                    draft_id=None,
-                    action=ApprovalAction.cancel,
-                    slack_user_id=body["user"]["id"],
-                )
-
-                batch = await repo.get_batch(session, b)
-                assert batch is not None
-                await _update_card(client, batch, build_draft_blocks(batch), fallback_text(batch))
-
+        if batch is not None:
+            await _update_card(client, batch, build_draft_blocks(batch), fallback_text(batch))
         logger.info("batch_cancelled", batch_id=str(b))
