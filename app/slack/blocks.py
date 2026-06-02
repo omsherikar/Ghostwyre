@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from app.db.models import BatchStatus, Draft, DraftBatch, DraftStatus
+from app.db.models import ApprovalEvent, BatchStatus, Draft, DraftBatch, DraftStatus
 from app.services.publisher import MAX_TWEET_LEN
 
 APPROVE_ACTION_ID = "approve_draft"
@@ -166,4 +166,47 @@ def build_draft_blocks(batch: DraftBatch) -> list[dict[str, Any]]:
     ]
     for draft in drafts:
         blocks.extend(_pending_draft_blocks(batch, draft))
+    return blocks
+
+
+def history_fallback(count: int) -> str:
+    """Plain-text notification line for the /post-history card."""
+    if count == 0:
+        return "Ghostwyre: no published posts yet."
+    word = "post" if count == 1 else "posts"
+    return f"Ghostwyre: your {count} most recent published {word}."
+
+
+def build_history_blocks(
+    published: list[ApprovalEvent],
+    unconfirmed: list[DraftBatch],
+) -> list[dict[str, Any]]:
+    """Render the published-post history (newest first), pure/no-I/O.
+
+    `published` are confirmed approve events (each with a publish_url + eager
+    draft/batch). `unconfirmed` are "approved without link" batches — surfaced as a
+    single warning so the user knows to check X. Times use Slack's <!date> token so
+    each viewer sees them localized.
+    """
+    blocks: list[dict[str, Any]] = [_header("Published posts")]
+
+    if unconfirmed:
+        n = len(unconfirmed)
+        word = "post" if n == 1 else "posts"
+        blocks.append(
+            _context(f"⚠️ {n} approved {word} couldn't be confirmed — check X before reposting.")
+        )
+
+    if not published:
+        blocks.append(_section("No published posts yet. Approve a draft and it shows up here."))
+        return blocks
+
+    for event in published:
+        blocks.append(_divider())
+        text = event.draft.text if event.draft is not None else "_(text unavailable)_"
+        blocks.append(_section(text))
+        ts = int(event.created_at.timestamp())
+        when = f"<!date^{ts}^{{date_short}} at {{time}}|{event.created_at:%Y-%m-%d}>"
+        meta = f"<{event.publish_url}|View on X> • {when} • <#{event.batch.slack_channel_id}>"
+        blocks.append(_context(meta))
     return blocks
