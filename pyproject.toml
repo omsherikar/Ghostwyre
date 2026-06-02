@@ -30,6 +30,9 @@ dev = [
     "pytest>=8.4",
     "pytest-asyncio>=0.24",
     "anyio>=4.6",
+    # X publishing is an optional *runtime* extra (see [project.optional-dependencies]),
+    # but it's a dev dependency so the XPublisher tests can import tweepy's exception types.
+    "tweepy>=4.14",
 ]
 
 [tool.uv]
