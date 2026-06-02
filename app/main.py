@@ -17,6 +17,7 @@ from slack_bolt.async_app import AsyncApp
 
 from app.config import get_settings
 from app.logging import configure_logging, get_logger
+from app.slack.actions import register as register_actions
 from app.slack.commands import register as register_commands
 
 settings = get_settings()
@@ -28,6 +29,7 @@ bolt_app = AsyncApp(
     signing_secret=settings.slack_signing_secret,
 )
 register_commands(bolt_app)
+register_actions(bolt_app)
 
 
 @asynccontextmanager
