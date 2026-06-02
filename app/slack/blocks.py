@@ -1,0 +1,169 @@
+"""Pure Block Kit builder for the approval card (no I/O).
+
+`build_draft_blocks` turns an ORM `DraftBatch` (with its child `.drafts` and a
+`.status`) into a Slack Block Kit blocks list. It is deliberately pure: it only
+reads attributes off the passed-in instances — no DB session, no network, no
+lookups. The actions handlers persist state and then re-render by calling this
+again, so every render is derived solely from the batch's current attributes.
+
+Card lifecycle (one living card per batch, edited in place):
+- pending   -> header + context + per-draft sections with approve/regenerate/cancel.
+- approved  -> the approved draft's text + a "Published (dry-run)." line, no buttons.
+- cancelled/expired -> a single tombstone section, no buttons.
+
+Button values are compact JSON (no whitespace) carrying only ids — never the
+transcript or draft text (CONFIDENTIAL at rest). `fallback_text` supplies the
+plain-text notification line the caller passes to chat_postMessage/chat_update.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from app.db.models import BatchStatus, Draft, DraftBatch, DraftStatus
+from app.services.publisher import MAX_TWEET_LEN
+
+APPROVE_ACTION_ID = "approve_draft"
+REGENERATE_ACTION_ID = "regenerate_draft"
+CANCEL_ACTION_ID = "cancel_batch"
+
+
+def _encode_value(**fields: str) -> str:
+    """Compact-JSON-encode a button value (ids only — never message content)."""
+    return json.dumps(fields, separators=(",", ":"))
+
+
+def fallback_text(batch: DraftBatch) -> str:
+    """Short plain-text notification line for the posted/updated card."""
+    n = len(batch.drafts)
+    if batch.status == BatchStatus.cancelled:
+        return "Ghostwyre: drafts cancelled — nothing was published."
+    if batch.status == BatchStatus.approved:
+        return "Ghostwyre: draft approved and published (dry-run)."
+    return f"Ghostwyre drafted {n} posts — approve, regenerate, or cancel."
+
+
+def _header(text: str) -> dict[str, Any]:
+    return {"type": "header", "text": {"type": "plain_text", "text": text}}
+
+
+def _section(mrkdwn: str) -> dict[str, Any]:
+    return {"type": "section", "text": {"type": "mrkdwn", "text": mrkdwn}}
+
+
+def _context(mrkdwn: str) -> dict[str, Any]:
+    return {"type": "context", "elements": [{"type": "mrkdwn", "text": mrkdwn}]}
+
+
+def _divider() -> dict[str, Any]:
+    return {"type": "divider"}
+
+
+def _approve_button(batch: DraftBatch, draft: Draft) -> dict[str, Any]:
+    return {
+        "type": "button",
+        "action_id": APPROVE_ACTION_ID,
+        "text": {"type": "plain_text", "text": "Approve"},
+        "style": "primary",
+        "value": _encode_value(b=str(batch.id), d=str(draft.id)),
+        "confirm": {
+            "title": {"type": "plain_text", "text": "Publish draft"},
+            "text": {"type": "mrkdwn", "text": "Publish this draft? (dry-run for now)"},
+            "confirm": {"type": "plain_text", "text": "Publish"},
+            "deny": {"type": "plain_text", "text": "Keep editing"},
+        },
+    }
+
+
+def _regenerate_button(batch: DraftBatch, draft: Draft) -> dict[str, Any]:
+    return {
+        "type": "button",
+        "action_id": REGENERATE_ACTION_ID,
+        "text": {"type": "plain_text", "text": "Regenerate"},
+        "value": _encode_value(b=str(batch.id), d=str(draft.id)),
+    }
+
+
+def _cancel_button(batch: DraftBatch) -> dict[str, Any]:
+    return {
+        "type": "button",
+        "action_id": CANCEL_ACTION_ID,
+        "text": {"type": "plain_text", "text": "Cancel"},
+        "style": "danger",
+        "value": _encode_value(b=str(batch.id)),
+    }
+
+
+def _pending_draft_blocks(batch: DraftBatch, draft: Draft) -> list[dict[str, Any]]:
+    """Render one pending-batch slot: divider, section, char-count, actions."""
+    slot_label = f"*Draft {draft.slot_index + 1}*"
+    blocks: list[dict[str, Any]] = [_divider()]
+
+    if draft.status == DraftStatus.regenerating:
+        # Placeholder — don't render the stale text, and offer no buttons.
+        blocks.append(_section(f"{slot_label}\n_Regenerating…_"))
+        return blocks
+
+    char_count = len(draft.text)
+    over_limit = char_count > MAX_TWEET_LEN
+
+    blocks.append(_section(f"{slot_label}\n{draft.text}"))
+
+    count_line = f"{char_count} / {MAX_TWEET_LEN} characters"
+    if over_limit:
+        count_line += " — too long to publish"
+    blocks.append(_context(count_line))
+
+    elements: list[dict[str, Any]] = []
+    if not over_limit:
+        elements.append(_approve_button(batch, draft))
+    elements.append(_regenerate_button(batch, draft))
+    elements.append(_cancel_button(batch))
+    blocks.append(
+        {
+            "type": "actions",
+            "block_id": f"draft_actions:{batch.id}:{draft.slot_index}",
+            "elements": elements,
+        }
+    )
+    return blocks
+
+
+def build_draft_blocks(batch: DraftBatch) -> list[dict[str, Any]]:
+    """Build the Block Kit blocks for *batch* from its current attributes.
+
+    Pure: reads `batch.status` and `batch.drafts` only. Returns ONLY the blocks
+    list — the caller pairs it with `fallback_text(batch)` for the top-level
+    `text` field when posting/updating.
+    """
+    if batch.status in (BatchStatus.cancelled, BatchStatus.expired):
+        return [
+            _section("~Drafts cancelled~ — nothing was published. Run /draft-post to start over.")
+        ]
+
+    if batch.status == BatchStatus.approved:
+        approved = next(
+            (d for d in batch.drafts if d.status == DraftStatus.approved),
+            None,
+        )
+        # Non-empty fallback: an empty section `text` is rejected by Slack. Only
+        # reachable on a contract violation (status=approved with no approved draft).
+        approved_text = approved.text if approved is not None else "_(draft unavailable)_"
+        return [
+            _section(approved_text),
+            _context("*Published (dry-run).*"),
+        ]
+
+    # Pending: the full interactive card (terminal states handled above).
+    drafts = sorted(batch.drafts, key=lambda d: d.slot_index)
+    n = len(drafts)
+    blocks: list[dict[str, Any]] = [
+        _header("Drafts ready — pick one to publish"),
+        _context(
+            f"From <#{batch.slack_channel_id}> • {n} drafts • publishing is *dry-run* in this phase"
+        ),
+    ]
+    for draft in drafts:
+        blocks.extend(_pending_draft_blocks(batch, draft))
+    return blocks
