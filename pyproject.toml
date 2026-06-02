@@ -1,0 +1,58 @@
+[project]
+name = "ghostwyre"
+version = "0.1.0"
+description = "Slack-native AI agent: reads channel messages, drafts posts in your voice, publishes to X after approval."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "slack-bolt>=1.21",
+    "anthropic>=0.40",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.30",
+    "alembic>=1.14",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "structlog>=24.4",
+]
+
+[project.optional-dependencies]
+# Real X publishing — not installed on the critical path; added when the
+# paid Basic tier is provisioned and DryRunPublisher is swapped for XPublisher.
+x = ["tweepy>=4.14"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.14",
+    "mypy>=1.18",
+    "pytest>=8.4",
+    "pytest-asyncio>=0.24",
+    "anyio>=4.6",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+# Third-party libs without type stubs:
+[[tool.mypy.overrides]]
+module = ["slack_bolt.*", "tweepy.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = [
+    "slow: integration/slow tests excluded from the fast Stop-hook subset",
+]
+testpaths = ["tests"]
