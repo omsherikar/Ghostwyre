@@ -23,7 +23,12 @@ from app.logging import get_logger
 from app.services.content import generate_post_drafts, load_voice
 from app.services.llm import build_client
 from app.services.schemas import Draft
-from app.slack.blocks import build_draft_blocks, fallback_text
+from app.slack.blocks import (
+    build_draft_blocks,
+    build_history_blocks,
+    fallback_text,
+    history_fallback,
+)
 from app.slack.ingest import (
     fetch_recent_messages,
     resolve_user_names,
@@ -130,3 +135,19 @@ def register(app: AsyncApp) -> None:
                 await repo.set_batch_message_ts(session, batch_id, channel, message_ts)
 
         logger.info("draft_post_card_posted", channel=channel, batch_id=str(batch_id))
+
+    @app.command("/post-history")
+    async def post_history(ack: Any, respond: Any) -> None:
+        # Ack first (3s window). The history read is quick, but the rule holds.
+        await ack()
+
+        # Read-only. Build the blocks inside the session so the eager-loaded
+        # batch/draft relationships stay attached while rendering.
+        async with SessionLocal() as session:
+            published = await repo.list_published(session, limit=settings.message_fetch_limit)
+            unconfirmed = await repo.list_unconfirmed_approved(session)
+            blocks = build_history_blocks(published, unconfirmed)
+            text = history_fallback(len(published))
+
+        await respond(blocks=blocks, text=text)
+        logger.info("post_history_replied", published=len(published), unconfirmed=len(unconfirmed))
