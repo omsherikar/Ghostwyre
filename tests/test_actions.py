@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app import repo
 from app.db.models import ApprovalAction, BatchStatus, DraftStatus
 from app.services.content import ContentResult
-from app.services.publisher import PublishError, PublishResult
+from app.services.publisher import PublishError, PublishResult, PublishUnknownError
 from app.services.schemas import Draft
 from app.slack import actions
 from app.slack.actions import parse_action_value, register
@@ -68,7 +68,7 @@ class FakeClient:
 class FakePublisher:
     """Records publish() calls; returns a dry-run result or raises PublishError."""
 
-    def __init__(self, *, error: PublishError | None = None) -> None:
+    def __init__(self, *, error: Exception | None = None) -> None:
         self._error = error
         self.calls: list[str] = []
 
@@ -79,10 +79,24 @@ class FakePublisher:
         return PublishResult(url="https://x.test/published/1", dry_run=True)
 
 
+class FailingClient:
+    """chat_update always raises — simulates a Slack failure *after* a publish."""
+
+    def __init__(self) -> None:
+        self.updates: list[dict[str, Any]] = []
+
+    async def chat_update(self, **kwargs: Any) -> dict[str, Any]:
+        self.updates.append(kwargs)
+        raise RuntimeError("slack down")
+
+
 class FakeLogger:
     """No-op structlog-shaped logger."""
 
     def info(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    def warning(self, *args: Any, **kwargs: Any) -> None:
         pass
 
     def exception(self, *args: Any, **kwargs: Any) -> None:
@@ -272,6 +286,75 @@ async def test_approve_idempotent_does_not_republish(
     async with test_sessionmaker() as session:
         loaded = await repo.get_batch(session, batch_id)
         assert loaded is not None
+        assert len(loaded.events) == 1
+
+
+@_db_test
+@_db_loop
+async def test_approve_ambiguous_failure_leaves_approved(
+    monkeypatch: pytest.MonkeyPatch,
+    test_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    pub = FakePublisher(error=PublishUnknownError("X didn't confirm the post — check X."))
+    monkeypatch.setattr(actions, "SessionLocal", test_sessionmaker)
+    fake_app = FakeApp()
+    register(fake_app)  # type: ignore[arg-type]
+    actions._set_publisher(pub)
+    callbacks = fake_app.callbacks
+
+    batch_id, draft_ids = await _seed_pending_batch(test_sessionmaker, draft_texts=["hello world"])
+    value = json.dumps({"b": str(batch_id), "d": str(draft_ids[0])})
+    client = FakeClient()
+
+    await _invoke(callbacks, "approve_draft", value=value, client=client)
+
+    assert pub.calls == ["hello world"]
+    async with test_sessionmaker() as session:
+        loaded = await repo.get_batch(session, batch_id)
+        assert loaded is not None
+        # At-most-once: stay approved (do NOT re-arm), audit row with no url.
+        assert loaded.status is BatchStatus.approved
+        assert loaded.drafts[0].status is DraftStatus.approved
+        assert len(loaded.events) == 1
+        assert loaded.events[0].publish_url is None
+
+    final_blocks = client.updates[-1]["blocks"]
+    assert not _has_actions_block(final_blocks)
+    assert "unknown" in json.dumps(final_blocks).lower()
+
+
+@_db_test
+@_db_loop
+async def test_approve_chat_update_failure_does_not_republish(
+    monkeypatch: pytest.MonkeyPatch,
+    test_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    pub = FakePublisher()
+    monkeypatch.setattr(actions, "SessionLocal", test_sessionmaker)
+    fake_app = FakeApp()
+    register(fake_app)  # type: ignore[arg-type]
+    actions._set_publisher(pub)
+    callbacks = fake_app.callbacks
+
+    batch_id, draft_ids = await _seed_pending_batch(test_sessionmaker, draft_texts=["hello"])
+    value = json.dumps({"b": str(batch_id), "d": str(draft_ids[0])})
+
+    # The publish succeeds and is committed (status -> approved, event recorded);
+    # the terminal chat_update then fails and the error propagates.
+    with pytest.raises(RuntimeError):
+        await _invoke(callbacks, "approve_draft", value=value, client=FailingClient())
+    assert pub.calls == ["hello"]
+
+    # Because the claim was committed BEFORE the network call, a re-click sees an
+    # already-approved batch and is idempotent — it does NOT republish. This is
+    # the double-publish race fix.
+    await _invoke(callbacks, "approve_draft", value=value, client=FakeClient())
+    assert pub.calls == ["hello"]
+
+    async with test_sessionmaker() as session:
+        loaded = await repo.get_batch(session, batch_id)
+        assert loaded is not None
+        assert loaded.status is BatchStatus.approved
         assert len(loaded.events) == 1
 
 
