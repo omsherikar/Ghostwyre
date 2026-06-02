@@ -72,6 +72,44 @@ async def get_draft(session: AsyncSession, draft_id: uuid.UUID) -> Draft | None:
     return result.scalar_one_or_none()
 
 
+async def list_published(session: AsyncSession, *, limit: int) -> list[ApprovalEvent]:
+    """Published-post history: approve events that carry a publish URL, newest first.
+
+    Each event eager-loads its batch (for channel) and draft (for the posted text).
+    Read-only.
+    """
+    result = await session.execute(
+        select(ApprovalEvent)
+        .where(
+            ApprovalEvent.action == ApprovalAction.approve,
+            ApprovalEvent.publish_url.isnot(None),
+        )
+        .order_by(ApprovalEvent.created_at.desc())
+        .limit(limit)
+        .options(selectinload(ApprovalEvent.batch), selectinload(ApprovalEvent.draft))
+    )
+    return list(result.scalars().all())
+
+
+async def list_unconfirmed_approved(session: AsyncSession) -> list[DraftBatch]:
+    """Batches stuck `approved` with no confirming publish event ("approved without
+    link"): an ambiguous publish (PublishUnknownError) or a crash mid-approve. These
+    need a human to check X. Read-only; oldest first so the longest-waiting surface up.
+    """
+    confirmed = select(ApprovalEvent.id).where(
+        ApprovalEvent.batch_id == DraftBatch.id,
+        ApprovalEvent.action == ApprovalAction.approve,
+        ApprovalEvent.publish_url.isnot(None),
+    )
+    result = await session.execute(
+        select(DraftBatch)
+        .where(DraftBatch.status == BatchStatus.approved, ~confirmed.exists())
+        .order_by(DraftBatch.created_at)
+        .options(selectinload(DraftBatch.drafts))
+    )
+    return list(result.scalars().all())
+
+
 async def set_batch_message_ts(
     session: AsyncSession,
     batch_id: uuid.UUID,

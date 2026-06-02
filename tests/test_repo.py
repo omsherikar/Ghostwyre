@@ -262,3 +262,96 @@ async def test_updated_at_advances_on_status_write(session: AsyncSession) -> Non
     await session.refresh(created)
 
     assert created.updated_at > before
+
+
+async def _publish(session: AsyncSession, text: str, url: str | None) -> None:
+    """Helper: create a batch and record one approve event (committed so created_at
+    advances — Postgres now() is frozen per transaction)."""
+    batch = await repo.create_batch(
+        session, channel_id=CHANNEL, user_id=USER, transcript=TRANSCRIPT, draft_texts=[text]
+    )
+    await repo.record_event(
+        session,
+        batch_id=batch.id,
+        draft_id=batch.drafts[0].id,
+        action=ApprovalAction.approve,
+        slack_user_id=USER,
+        publish_url=url,
+    )
+    await session.commit()
+
+
+async def test_list_published_newest_first_and_filters(session: AsyncSession) -> None:
+    await _publish(session, "first post", "https://x.test/1")
+    await _publish(session, "second post", "https://x.test/2")
+    # Noise that must be excluded: an approve with no url (ambiguous) and a cancel.
+    await _publish(session, "ambiguous", None)
+    cx = await repo.create_batch(
+        session, channel_id=CHANNEL, user_id=USER, transcript=TRANSCRIPT, draft_texts=["c"]
+    )
+    await repo.record_event(
+        session, batch_id=cx.id, draft_id=None, action=ApprovalAction.cancel, slack_user_id=USER
+    )
+    await session.commit()
+
+    published = await repo.list_published(session, limit=10)
+
+    assert [e.publish_url for e in published] == ["https://x.test/2", "https://x.test/1"]
+    assert all(e.action is ApprovalAction.approve for e in published)
+    # eager-loaded relationships are usable without another query
+    assert published[0].draft is not None
+    assert published[0].batch.slack_channel_id == CHANNEL
+
+
+async def test_list_published_respects_limit(session: AsyncSession) -> None:
+    await _publish(session, "a", "https://x.test/a")
+    await _publish(session, "b", "https://x.test/b")
+    await _publish(session, "c", "https://x.test/c")
+
+    assert len(await repo.list_published(session, limit=2)) == 2
+
+
+async def test_list_unconfirmed_approved(session: AsyncSession) -> None:
+    # Ambiguous: approved + an approve event with no url.
+    amb = await repo.create_batch(
+        session, channel_id=CHANNEL, user_id=USER, transcript=TRANSCRIPT, draft_texts=["amb"]
+    )
+    await repo.set_batch_status(session, amb.id, BatchStatus.approved)
+    await repo.record_event(
+        session,
+        batch_id=amb.id,
+        draft_id=amb.drafts[0].id,
+        action=ApprovalAction.approve,
+        slack_user_id=USER,
+        publish_url=None,
+    )
+    # Crashed: approved with no events at all.
+    crash = await repo.create_batch(
+        session, channel_id=CHANNEL, user_id=USER, transcript=TRANSCRIPT, draft_texts=["crash"]
+    )
+    await repo.set_batch_status(session, crash.id, BatchStatus.approved)
+    # Confirmed: approved WITH a url event -> excluded.
+    ok = await repo.create_batch(
+        session, channel_id=CHANNEL, user_id=USER, transcript=TRANSCRIPT, draft_texts=["ok"]
+    )
+    await repo.set_batch_status(session, ok.id, BatchStatus.approved)
+    await repo.record_event(
+        session,
+        batch_id=ok.id,
+        draft_id=ok.drafts[0].id,
+        action=ApprovalAction.approve,
+        slack_user_id=USER,
+        publish_url="https://x.test/ok",
+    )
+    # Pending: excluded.
+    pend = await repo.create_batch(
+        session, channel_id=CHANNEL, user_id=USER, transcript=TRANSCRIPT, draft_texts=["pend"]
+    )
+    await session.commit()
+
+    ids = {b.id for b in await repo.list_unconfirmed_approved(session)}
+
+    assert amb.id in ids
+    assert crash.id in ids
+    assert ok.id not in ids
+    assert pend.id not in ids
