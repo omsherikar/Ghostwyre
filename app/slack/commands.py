@@ -1,8 +1,12 @@
 """Slack slash-command handlers.
 
 `/draft-post` acks within Slack's 3-second window, then does the real work:
-read the channel, gate on whether anything is postworthy, and reply with drafts.
-Approval buttons / Block Kit are Phase 3 — for now we reply with plain text.
+read the channel, gate on whether anything is postworthy, and — when there's
+something to post — persist the batch and post one living Block Kit approval
+card in-channel (Phase 3). Persist BEFORE posting so the handlers can resolve
+everything by id, then record the card's message ts on the batch.
+
+Never logs the transcript or draft text (CONFIDENTIAL at rest) — ids/counts only.
 """
 
 from __future__ import annotations
@@ -10,12 +14,16 @@ from __future__ import annotations
 from typing import Any
 
 from slack_bolt.async_app import AsyncApp
+from slack_sdk.errors import SlackApiError
 
+from app import repo
 from app.config import get_settings
+from app.db import SessionLocal
 from app.logging import get_logger
 from app.services.content import generate_post_drafts, load_voice
 from app.services.llm import build_client
 from app.services.schemas import Draft
+from app.slack.blocks import build_draft_blocks, fallback_text
 from app.slack.ingest import (
     fetch_recent_messages,
     resolve_user_names,
@@ -24,6 +32,9 @@ from app.slack.ingest import (
 )
 
 logger = get_logger(__name__)
+
+# Slack web errors that mean "I'm not in this channel" — actionable for the user.
+_NOT_IN_CHANNEL_ERRORS = {"not_in_channel", "channel_not_found", "is_archived"}
 
 
 def format_drafts(drafts: list[Draft]) -> str:
@@ -73,11 +84,49 @@ def register(app: AsyncApp) -> None:
             await respond("Something went wrong while drafting — check the logs.")
             return
 
-        if not result.postworthy:
+        # Gate: nothing to post, or postworthy but no drafts came back. The empty-drafts
+        # case shouldn't normally happen, but guard it so we never post a degenerate
+        # card (header + context, no draft sections or buttons).
+        if not result.postworthy or not result.drafts:
             await respond(
                 "Nothing here looks postworthy right now — try again after some real discussion."
             )
             return
 
-        logger.info("draft_post_replied", channel=channel, draft_count=len(result.drafts))
-        await respond(format_drafts(result.drafts))
+        # Persist BEFORE posting so the card's handlers can resolve everything by
+        # id. Build the blocks + fallback text inside the session, while the
+        # batch's lazy attrs (id, drafts) are still loadable.
+        async with SessionLocal() as session:
+            async with session.begin():
+                batch = await repo.create_batch(
+                    session,
+                    channel_id=channel,
+                    user_id=command["user_id"],
+                    transcript=transcript,
+                    draft_texts=[d.text for d in result.drafts],
+                )
+                batch_id = batch.id
+                blocks = build_draft_blocks(batch)
+                text = fallback_text(batch)
+
+        logger.info("draft_post_persisted", channel=channel, draft_count=len(result.drafts))
+
+        # Post the living card IN-CHANNEL so we capture the message ts.
+        try:
+            resp = await client.chat_postMessage(channel=channel, blocks=blocks, text=text)
+        except SlackApiError as exc:
+            error = (exc.response or {}).get("error")
+            if error in _NOT_IN_CHANNEL_ERRORS:
+                logger.warning("draft_post_not_in_channel", channel=channel, error=error)
+                await respond("I couldn't post here — invite me to the channel and try again.")
+                return
+            logger.exception("draft_post_post_failed", channel=channel, error=error)
+            await respond("Something went wrong posting the drafts — check the logs.")
+            return
+
+        message_ts = resp["ts"]
+        async with SessionLocal() as session:
+            async with session.begin():
+                await repo.set_batch_message_ts(session, batch_id, channel, message_ts)
+
+        logger.info("draft_post_card_posted", channel=channel, batch_id=str(batch_id))
