@@ -43,7 +43,7 @@ class FakeClient:
 
 
 def _settings() -> Settings:
-    return Settings(anthropic_api_key="test-key")
+    return Settings(llm_provider="anthropic", anthropic_api_key="test-key")
 
 
 @pytest.mark.asyncio

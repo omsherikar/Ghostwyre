@@ -14,11 +14,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from anthropic import AsyncAnthropic
-
 from app.config import Settings
 from app.logging import get_logger
-from app.services.llm import extract_postworthy, generate_drafts
+from app.services.llm import LLMClient, extract_postworthy, generate_drafts
 from app.services.schemas import Draft
 
 logger = get_logger(__name__)
@@ -42,7 +40,7 @@ async def generate_post_drafts(
     transcript: str,
     voice: str,
     *,
-    client: AsyncAnthropic,
+    client: LLMClient,
     settings: Settings,
 ) -> ContentResult:
     """Run the content pipeline: extract postworthy items, then draft posts.
