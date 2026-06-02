@@ -44,7 +44,9 @@ class FakeClient:
 
 
 def _settings() -> Settings:
-    return Settings(anthropic_api_key="test-key")
+    # Pin the provider so a populated dev .env (e.g. LLM_PROVIDER=groq) can't
+    # reroute these Anthropic-path tests.
+    return Settings(llm_provider="anthropic", anthropic_api_key="test-key")
 
 
 @pytest.mark.asyncio
