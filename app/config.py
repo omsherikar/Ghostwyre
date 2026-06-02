@@ -31,8 +31,13 @@ class Settings(BaseSettings):
     message_fetch_limit: int = Field(default=50, description="How many recent messages to pull")
 
     # --- LLM (Phase 2) ---
+    # Which provider services/llm.py talks to. "anthropic" (default) uses Claude;
+    # "groq" uses Groq's fast, OpenAI-compatible API (free tier) with the groq_model.
+    llm_provider: Literal["anthropic", "groq"] = "anthropic"
     anthropic_api_key: str | None = None
     llm_model: str = "claude-sonnet-4-6"
+    groq_api_key: str | None = None
+    groq_model: str = "llama-3.3-70b-versatile"
     max_drafts: int = 3
 
     # --- Database (Phase 0+) ---
