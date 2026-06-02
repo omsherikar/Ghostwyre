@@ -1,12 +1,16 @@
 """LLM layer: content-generation steps over Slack transcripts.
 
-Step A (this unit) is `extract_postworthy`: read a team-chat transcript and
-return only the items genuinely worth posting publicly. This is the quality
-gate that keeps the pipeline from producing slop — most clones skip it.
+Step A is `extract_postworthy`: read a team-chat transcript and return only the
+items genuinely worth posting publicly. This is the quality gate that keeps the
+pipeline from producing slop — most clones skip it.
+
+Step B is `generate_drafts`: turn those postworthy items into candidate posts
+written in the user's voice. Voice is the moat: the drafts must sound like the
+user, governed by the `voice` guide passed in as a cached system block.
 
 Two reliability choices are baked in:
-- The stable system prompt is sent as a `cache_control: ephemeral` block so
-  repeated calls hit the prompt cache.
+- Stable system prompts are sent with `cache_control: ephemeral` so repeated
+  calls hit the prompt cache. For step B, system+voice cache together.
 - `output_config` structured outputs guarantees schema-valid JSON; we still
   parse defensively and retry once, because a single malformed response should
   not fail the whole `/draft-post` flow.
@@ -14,13 +18,16 @@ Two reliability choices are baked in:
 
 from __future__ import annotations
 
+from typing import Any
+
 from anthropic import AsyncAnthropic
-from pydantic import ValidationError
+from anthropic.types import TextBlockParam
+from pydantic import BaseModel, ValidationError
 
 from app.config import Settings, get_settings
 from app.logging import get_logger
 from app.services.json_parse import JSONParseError, loads_lenient
-from app.services.schemas import PostworthyResult
+from app.services.schemas import DraftSet, PostworthyItem, PostworthyResult
 
 logger = get_logger(__name__)
 
@@ -71,6 +78,49 @@ def build_client(settings: Settings | None = None) -> AsyncAnthropic:
     return AsyncAnthropic(api_key=settings.anthropic_api_key)
 
 
+async def _structured_call[ModelT: BaseModel](
+    *,
+    client: AsyncAnthropic,
+    settings: Settings,
+    system: list[TextBlockParam],
+    user: str,
+    schema: dict[str, Any],
+    model_cls: type[ModelT],
+) -> ModelT:
+    """Call the model with structured output, then parse + validate into *model_cls*.
+
+    The stable *system* blocks (caller-supplied, including any `cache_control`)
+    and the *user* message are sent with an `output_config` json_schema. The
+    text block is extracted safely; a missing text block, malformed JSON, or a
+    schema mismatch raises and triggers exactly one retry. After two failed
+    attempts the last error propagates. Never logs message content.
+    """
+    last_error: Exception | None = None
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        try:
+            resp = await client.messages.create(
+                model=settings.llm_model,
+                max_tokens=1024,
+                system=system,
+                messages=[{"role": "user", "content": user}],
+                output_config={"format": {"type": "json_schema", "schema": schema}},
+            )
+            text_block = next((b for b in resp.content if b.type == "text"), None)
+            if text_block is None:
+                raise JSONParseError("No text block in model response")
+            data = loads_lenient(text_block.text)
+            return model_cls.model_validate(data)
+        except (JSONParseError, ValidationError) as exc:
+            last_error = exc
+            logger.warning(
+                "structured_call_parse_failed",
+                attempt=attempt,
+                max_attempts=_MAX_ATTEMPTS,
+            )
+    assert last_error is not None  # loop runs at least once
+    raise last_error
+
+
 async def extract_postworthy(
     transcript: str,
     *,
@@ -83,45 +133,93 @@ async def extract_postworthy(
     second attempt also fails, the error propagates. Never logs transcript
     content.
     """
-    last_error: Exception | None = None
-    for attempt in range(1, _MAX_ATTEMPTS + 1):
-        try:
-            return await _call_and_parse(transcript, client=client, settings=settings)
-        except (JSONParseError, ValidationError) as exc:
-            last_error = exc
-            logger.warning(
-                "postworthy_extract_parse_failed",
-                attempt=attempt,
-                max_attempts=_MAX_ATTEMPTS,
-            )
-    assert last_error is not None  # loop runs at least once
-    raise last_error
+    system: list[TextBlockParam] = [
+        {
+            "type": "text",
+            "text": EXTRACT_SYSTEM,
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+    result = await _structured_call(
+        client=client,
+        settings=settings,
+        system=system,
+        user=transcript,
+        schema=EXTRACT_SCHEMA,
+        model_cls=PostworthyResult,
+    )
+    logger.info("postworthy_extract_complete", item_count=len(result.items))
+    return result
 
 
-async def _call_and_parse(
-    transcript: str,
+DRAFT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "drafts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["drafts"],
+    "additionalProperties": False,
+}
+
+DRAFT_SYSTEM = """\
+You write candidate social-media posts (for X) in the user's voice.
+
+The user's voice is provided as a separate guide. Treat it as the source of \
+truth for tone, style, and what is allowed.
+
+Strict rules:
+- Produce 2-3 DISTINCT drafts, each taking a different angle on the material.
+- Each draft is a complete, standalone post — not a thread, not a continuation.
+- Each draft must be at most 280 characters.
+- Strictly follow the voice and tone rules in the provided guide.
+- Do NOT add hashtags or emojis unless the voice guide explicitly allows them.
+- Output only the posts: no preamble, no commentary, no numbering."""
+
+
+def _render_items(items: list[PostworthyItem], max_drafts: int) -> str:
+    """Render postworthy *items* into a readable prompt with a draft instruction."""
+    lines = [f"- {item.summary} (why: {item.reason})" for item in items]
+    body = "\n".join(lines)
+    return (
+        "Here are the postworthy items to draft from:\n"
+        f"{body}\n\n"
+        f"Write up to {max_drafts} distinct posts in the user's voice."
+    )
+
+
+async def generate_drafts(
+    items: list[PostworthyItem],
+    voice: str,
     *,
     client: AsyncAnthropic,
     settings: Settings,
-) -> PostworthyResult:
-    resp = await client.messages.create(
-        model=settings.llm_model,
-        max_tokens=1024,
-        system=[
-            {
-                "type": "text",
-                "text": EXTRACT_SYSTEM,
-                "cache_control": {"type": "ephemeral"},
-            }
-        ],
-        messages=[{"role": "user", "content": transcript}],
-        output_config={"format": {"type": "json_schema", "schema": EXTRACT_SCHEMA}},
+) -> DraftSet:
+    """Draft candidate posts from postworthy *items*, in the user's *voice*.
+
+    The stable draft instructions and the *voice* guide are sent as system
+    blocks; the voice block carries `cache_control` so system+voice cache
+    together across calls. Retries the call+parse exactly once on failure.
+    Never logs the drafts' text or the transcript.
+    """
+    system: list[TextBlockParam] = [
+        {"type": "text", "text": DRAFT_SYSTEM},
+        {"type": "text", "text": voice, "cache_control": {"type": "ephemeral"}},
+    ]
+    result = await _structured_call(
+        client=client,
+        settings=settings,
+        system=system,
+        user=_render_items(items, settings.max_drafts),
+        schema=DRAFT_SCHEMA,
+        model_cls=DraftSet,
     )
-    text_block = next((b for b in resp.content if b.type == "text"), None)
-    if text_block is None:
-        raise JSONParseError("No text block in model response")
-    text = text_block.text
-    data = loads_lenient(text)
-    result = PostworthyResult.model_validate(data)
-    logger.info("postworthy_extract_complete", item_count=len(result.items))
+    logger.info("drafts_generate_complete", draft_count=len(result.drafts))
     return result
