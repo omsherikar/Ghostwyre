@@ -30,8 +30,9 @@ from slack_bolt.async_app import AsyncApp
 from app import repo
 from app.config import get_settings
 from app.db import SessionLocal
-from app.db.models import ApprovalAction, BatchStatus, DraftBatch, DraftStatus
+from app.db.models import ApprovalAction, BatchStatus, DraftBatch, DraftPlatform, DraftStatus
 from app.logging import get_logger
+from app.platforms import PLATFORMS
 from app.services.content import generate_post_drafts, load_voice
 from app.services.llm import build_client
 from app.services.publisher import (
@@ -168,6 +169,19 @@ def register(app: AsyncApp) -> None:
                         batch,
                         _notice_blocks("Sorry — that draft is gone. Run `/draft-post` again."),
                         "Ghostwyre: draft not found.",
+                    )
+                    return
+
+                # Backstop for the UI gate: only a publishable platform (X) within
+                # the effective limit can be approved. LinkedIn / over-limit X are
+                # copy-only — re-render without claiming or publishing.
+                spec = PLATFORMS[str(draft.platform)]
+                if not spec.publishable or len(draft.text) > settings.x_char_limit:
+                    await _update_card(
+                        client,
+                        batch,
+                        build_draft_blocks(batch, x_char_limit=settings.x_char_limit),
+                        fallback_text(batch),
                     )
                     return
 
@@ -329,7 +343,14 @@ def register(app: AsyncApp) -> None:
         # Swap the drafts + record the event in one short transaction, THEN render.
         async with SessionLocal() as session:
             async with session.begin():
-                await repo.replace_drafts(session, b, [d.text for d in result.drafts])
+                await repo.replace_drafts(
+                    session,
+                    b,
+                    [
+                        repo.DraftSpec(text=d.text, platform=DraftPlatform(d.platform))
+                        for d in result.drafts
+                    ],
+                )
                 await repo.record_event(
                     session,
                     batch_id=b,

@@ -19,6 +19,7 @@ from slack_sdk.errors import SlackApiError
 from app import repo
 from app.config import get_settings
 from app.db import SessionLocal
+from app.db.models import DraftPlatform
 from app.logging import get_logger
 from app.services.content import generate_post_drafts, load_voice
 from app.services.llm import build_client
@@ -108,7 +109,10 @@ def register(app: AsyncApp) -> None:
                     channel_id=channel,
                     user_id=command["user_id"],
                     transcript=transcript,
-                    draft_texts=[d.text for d in result.drafts],
+                    drafts=[
+                        repo.DraftSpec(text=d.text, platform=DraftPlatform(d.platform))
+                        for d in result.drafts
+                    ],
                 )
                 batch_id = batch.id
                 blocks = build_draft_blocks(batch, x_char_limit=settings.x_char_limit)

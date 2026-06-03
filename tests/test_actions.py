@@ -22,7 +22,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import repo
-from app.db.models import ApprovalAction, BatchStatus, DraftStatus
+from app.db.models import ApprovalAction, BatchStatus, DraftPlatform, DraftStatus
 from app.services.content import ContentResult
 from app.services.publisher import PublishError, PublishResult, PublishUnknownError
 from app.services.schemas import Draft
@@ -157,6 +157,7 @@ async def _seed_pending_batch(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
     draft_texts: list[str],
+    platform: DraftPlatform = DraftPlatform.x,
 ) -> Any:
     async with sessionmaker() as session:
         async with session.begin():
@@ -165,7 +166,7 @@ async def _seed_pending_batch(
                 channel_id=CHANNEL,
                 user_id=USER,
                 transcript=TRANSCRIPT,
-                draft_texts=draft_texts,
+                drafts=[repo.DraftSpec(text=t, platform=platform) for t in draft_texts],
             )
             await repo.set_batch_message_ts(session, batch.id, CHANNEL, TS)
             batch_id = batch.id
@@ -357,6 +358,37 @@ async def test_approve_chat_update_failure_does_not_republish(
         assert loaded is not None
         assert loaded.status is BatchStatus.approved
         assert len(loaded.events) == 1
+
+
+@_db_test
+@_db_loop
+async def test_approve_linkedin_draft_does_not_publish(
+    monkeypatch: pytest.MonkeyPatch,
+    test_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    pub = FakePublisher()
+    monkeypatch.setattr(actions, "SessionLocal", test_sessionmaker)
+    fake_app = FakeApp()
+    register(fake_app)  # type: ignore[arg-type]
+    actions._set_publisher(pub)
+    callbacks = fake_app.callbacks
+
+    batch_id, draft_ids = await _seed_pending_batch(
+        test_sessionmaker,
+        draft_texts=["a developed linkedin post"],
+        platform=DraftPlatform.linkedin,
+    )
+    value = json.dumps({"b": str(batch_id), "d": str(draft_ids[0])})
+
+    # LinkedIn is copy-only — the approve guard must refuse before claiming.
+    await _invoke(callbacks, "approve_draft", value=value, client=FakeClient())
+
+    assert pub.calls == []  # never published
+    async with test_sessionmaker() as session:
+        loaded = await repo.get_batch(session, batch_id)
+        assert loaded is not None
+        assert loaded.status is BatchStatus.pending  # not claimed
+        assert loaded.events == []
 
 
 @_db_test
