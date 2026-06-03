@@ -165,6 +165,13 @@ always copy-paste. If you raise `X_CHAR_LIMIT`, also raise `DRAFT_MAX_TOKENS`.
 - **A postworthy filter before drafting.** The first LLM step can say "nothing
   here is worth posting" and skip drafting entirely — the difference between a real
   tool and a slop generator.
+- **Transparent idea-finding, with evidence.** It doesn't silently pick for you:
+  it scores and ranks the candidate ideas and shows the *real quotes* behind each,
+  so "we filtered the channel down to these" is inspectable, not a black box.
+- **Learns from your edits, not tone sliders.** Voice comes from your real posts
+  (`/setup`) and from how you edit drafts — distilled into durable rules you can see
+  and prune (`/voice`). The signal is intentional (edits only), and it's additive:
+  rules layer onto the voice card rather than rewriting it.
 - **At-most-once publish gate.** Approve atomically claims the batch (a
   compare-and-swap `pending → approved`) and commits *before* the network call, so
   a double-click, Slack retry, or failed card update can never double-post.
@@ -173,8 +180,18 @@ always copy-paste. If you raise `X_CHAR_LIMIT`, also raise `DRAFT_MAX_TOKENS`.
 - **Async everywhere**, structured logging with PII redaction (raw message and
   draft text are never logged), and secrets only via `pydantic-settings`.
 
-## Stack
-Python 3.12 · FastAPI · Slack Bolt (Socket Mode) · Anthropic SDK (Claude) ·
-SQLAlchemy (async) + Alembic + PostgreSQL · tweepy (X, optional).
+## Status & limitations
 
-The full build plan lives in `dev-docs/chat-to-content-agent-v1-plan.md`.
+All of v1 (Phases 0–5) and v2 (**Pillars A–D**: voice-from-posts, platform-native
+generation, idea ranking + pick, feedback memory) is shipped. Known follow-ups not
+yet built: **data retention** — transcripts and post history are kept in Postgres
+indefinitely with no cleanup/expiry — and encryption-at-rest. Voice memory persists
+until you `/voice` → Forget it.
+
+## Stack
+Python 3.12 · FastAPI · Slack Bolt (Socket Mode) · LLM provider-agnostic — Anthropic
+SDK (Claude) or Groq, chosen by `LLM_PROVIDER` · SQLAlchemy (async) + Alembic +
+PostgreSQL · tweepy (X, optional extra).
+
+Build plans: `dev-docs/chat-to-content-agent-v1-plan.md` (v1) and
+`dev-docs/chat-to-content-agent-v2-plan.md` (v2, Pillars A–D).
