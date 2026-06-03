@@ -27,3 +27,10 @@ class Draft(BaseModel):
 
 class DraftSet(BaseModel):
     drafts: list[Draft]
+
+
+class VoiceCard(BaseModel):
+    """A per-platform voice profile distilled from a user's real posts."""
+
+    voice_card: str
+    positioning: str

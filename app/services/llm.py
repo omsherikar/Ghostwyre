@@ -29,7 +29,7 @@ from pydantic import BaseModel, ValidationError
 from app.config import Settings, get_settings
 from app.logging import get_logger
 from app.services.json_parse import JSONParseError, loads_lenient
-from app.services.schemas import DraftSet, PostworthyItem, PostworthyResult
+from app.services.schemas import DraftSet, PostworthyItem, PostworthyResult, VoiceCard
 
 logger = get_logger(__name__)
 
@@ -299,4 +299,63 @@ async def generate_drafts(
         max_tokens=settings.draft_max_tokens,
     )
     logger.info("drafts_generate_complete", draft_count=len(result.drafts))
+    return result
+
+
+VOICE_DISTILL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "voice_card": {"type": "string"},
+        "positioning": {"type": "string"},
+    },
+    "required": ["voice_card", "positioning"],
+    "additionalProperties": False,
+}
+
+VOICE_DISTILL_SYSTEM = """\
+You analyze a person's real social-media posts for one platform and distill HOW
+they write, so another system can draft new posts that sound exactly like them.
+
+Produce two things:
+- voice_card: a concrete, prescriptive style guide derived ONLY from the posts —
+  their hooks/openers, sentence rhythm and length, vocabulary and signature
+  phrases, formatting habits (line breaks, lists, emoji/hashtag usage), recurring
+  themes, and the things they clearly never do. Write it as direct rules a writer
+  could follow. Be specific and cite patterns you actually observe — never invent.
+- positioning: 2-3 sentences on who they are and what they want to be known for,
+  combining the themes in their posts with their stated goal (if any).
+
+Do not quote a whole post as a "rule" — describe the underlying pattern."""
+
+
+def _render_distill_request(posts: list[str], goals: str, platform: str) -> str:
+    """Build the distillation prompt from the user's posts + stated goal."""
+    numbered = "\n\n".join(f"[Post {i}]\n{post}" for i, post in enumerate(posts, start=1))
+    goal_line = f"Their stated goal: {goals}\n\n" if goals.strip() else ""
+    return f"Platform: {platform}\n\n{goal_line}Their real posts:\n\n{numbered}"
+
+
+async def distill_voice_profile(
+    posts: list[str],
+    goals: str,
+    platform: str,
+    *,
+    client: LLMClient,
+    settings: Settings,
+) -> VoiceCard:
+    """Distill a per-platform voice card + positioning from the user's real *posts*.
+
+    Reuses the structured-output + retry-once machinery. Never logs the posts.
+    """
+    system: list[TextBlockParam] = [{"type": "text", "text": VOICE_DISTILL_SYSTEM}]
+    result = await _structured_call(
+        client=client,
+        settings=settings,
+        system=system,
+        user=_render_distill_request(posts, goals, platform),
+        schema=VOICE_DISTILL_SCHEMA,
+        model_cls=VoiceCard,
+        max_tokens=settings.draft_max_tokens,
+    )
+    logger.info("voice_distill_complete", platform=platform, post_count=len(posts))
     return result
