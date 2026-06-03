@@ -66,6 +66,63 @@ async def create_batch(
     return batch
 
 
+async def create_idea_batch(
+    session: AsyncSession,
+    *,
+    channel_id: str,
+    user_id: str,
+    transcript: str,
+    candidate_ideas: list[dict[str, Any]],
+) -> DraftBatch:
+    """Persist a `selecting` batch carrying the ranked candidate ideas (no drafts yet).
+
+    The ideas are stored as JSON on the batch; the pick action later reads the
+    chosen one by index, drafts it, and flips the batch to `pending`.
+    """
+    batch = DraftBatch(
+        slack_channel_id=channel_id,
+        slack_user_id=user_id,
+        transcript=transcript,
+        status=BatchStatus.selecting,
+        candidate_ideas=candidate_ideas,
+    )
+    session.add(batch)
+    await session.flush()
+    await session.refresh(batch, ["drafts"])
+    return batch
+
+
+async def set_chosen_idea(session: AsyncSession, batch_id: uuid.UUID, index: int | None) -> None:
+    """Record which ranked idea (by index) the user chose to draft; None clears it."""
+    batch = await session.get(DraftBatch, batch_id)
+    if batch is None:
+        raise LookupError(f"DraftBatch {batch_id} not found")
+    batch.chosen_idea_index = index
+    await session.flush()
+
+
+async def claim_idea_for_drafting(session: AsyncSession, batch_id: uuid.UUID, index: int) -> bool:
+    """Atomically claim a `selecting` batch's idea for drafting (CAS).
+
+    Sets `chosen_idea_index` iff the batch is still `selecting` AND unclaimed
+    (`chosen_idea_index IS NULL`), returning True only for the call that won. A
+    concurrent second "Draft this" click then loses the claim and can't fire a
+    duplicate (expensive) LLM draft or clobber the first draft set — the pick-side
+    sibling of `claim_for_publish`. Stamps `updated_at` by hand (Core UPDATE).
+    """
+    result = await session.execute(
+        update(DraftBatch)
+        .where(
+            DraftBatch.id == batch_id,
+            DraftBatch.status == BatchStatus.selecting,
+            DraftBatch.chosen_idea_index.is_(None),
+        )
+        .values(chosen_idea_index=index, updated_at=func.now())
+    )
+    await session.flush()
+    return cast("CursorResult[Any]", result).rowcount == 1
+
+
 async def get_batch(session: AsyncSession, batch_id: uuid.UUID) -> DraftBatch | None:
     """Load a batch with its drafts (slot-ordered) and events, or None if missing."""
     result = await session.execute(

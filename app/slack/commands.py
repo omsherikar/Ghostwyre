@@ -19,16 +19,18 @@ from slack_sdk.errors import SlackApiError
 from app import repo
 from app.config import get_settings
 from app.db import SessionLocal
-from app.db.models import DraftPlatform
+from app.db.models import BatchStatus, DraftPlatform
 from app.logging import get_logger
-from app.services.content import build_voices, generate_post_drafts, load_voice
+from app.services.content import build_voices, generate_idea_drafts, load_voice, rank_channel_ideas
 from app.services.llm import build_client
 from app.services.schemas import Draft
 from app.slack.blocks import (
     build_draft_blocks,
     build_history_blocks,
+    build_idea_blocks,
     fallback_text,
     history_fallback,
+    idea_fallback_text,
 )
 from app.slack.ingest import (
     fetch_recent_messages,
@@ -67,7 +69,7 @@ def register(app: AsyncApp) -> None:
         channel = command["channel_id"]
 
         # 2) Real work (we're already past the ack, so this can take its time).
-        raw = await fetch_recent_messages(client, channel, settings.message_fetch_limit)
+        raw = await fetch_recent_messages(client, channel, settings.idea_scan_limit)
         names = await resolve_user_names(client, unique_user_ids(raw))
         transcript = to_transcript(raw, user_names=names)
         line_count = transcript.count("\n") + 1 if transcript else 0
@@ -81,51 +83,97 @@ def register(app: AsyncApp) -> None:
             )
             return
 
-        # Build the invoker's per-platform voices: their stored profile where it
-        # exists, else the voice.md seed. Build inside the session so the profile
-        # rows' attrs are read while still attached.
-        async with SessionLocal() as session:
-            profiles = await repo.get_voice_profiles(session, command["user_id"])
-            voices = build_voices(profiles, voice)
-
+        # Scan + rank the channel's candidate ideas: a cheap postworthy gate, then a
+        # scored/deduped/ranked shortlist with evidence (no drafting yet).
         try:
-            result = await generate_post_drafts(
-                transcript, voices, client=anthropic_client, settings=settings
+            ranking = await rank_channel_ideas(
+                transcript, client=anthropic_client, settings=settings
             )
         except Exception:
-            logger.exception("draft_post_generation_failed", channel=channel)
-            await respond("Something went wrong while drafting — check the logs.")
+            logger.exception("draft_post_ranking_failed", channel=channel)
+            await respond("Something went wrong while reading the channel — check the logs.")
             return
 
-        # Gate: nothing to post, or postworthy but no drafts came back. The empty-drafts
-        # case shouldn't normally happen, but guard it so we never post a degenerate
-        # card (header + context, no draft sections or buttons).
-        if not result.postworthy or not result.drafts:
+        if not ranking.postworthy or not ranking.ideas:
             await respond(
                 "Nothing here looks postworthy right now — try again after some real discussion."
             )
             return
 
-        # Persist BEFORE posting so the card's handlers can resolve everything by
-        # id. Build the blocks + fallback text inside the session, while the
-        # batch's lazy attrs (id, drafts) are still loadable.
-        async with SessionLocal() as session:
-            async with session.begin():
-                batch = await repo.create_batch(
-                    session,
-                    channel_id=channel,
-                    user_id=command["user_id"],
-                    transcript=transcript,
-                    drafts=[
-                        repo.DraftSpec(text=d.text, platform=DraftPlatform(d.platform))
-                        for d in result.drafts
-                    ],
-                )
-                batch_id = batch.id
-                blocks = build_draft_blocks(batch, x_char_limit=settings.x_char_limit)
-                text = fallback_text(batch)
+        user_id = command["user_id"]
+        ideas = ranking.ideas
 
-        logger.info("draft_post_persisted", channel=channel, draft_count=len(result.drafts))
+        # Persist BEFORE posting so the card's handlers resolve everything by id, and
+        # build blocks/fallback inside the session while the batch is attached.
+        if len(ideas) == 1:
+            # One clear idea — skip the picker; draft it now (keep a transparency line).
+            async with SessionLocal() as session:
+                profiles = await repo.get_voice_profiles(session, user_id)
+                voices = build_voices(profiles, voice)
+            try:
+                content = await generate_idea_drafts(
+                    ideas[0], transcript, voices, client=anthropic_client, settings=settings
+                )
+            except Exception:
+                logger.exception("draft_post_generation_failed", channel=channel)
+                await respond("Something went wrong while drafting — check the logs.")
+                return
+            if not content.drafts:
+                await respond(
+                    "Nothing here looks postworthy right now — try again after some discussion."
+                )
+                return
+            async with SessionLocal() as session:
+                async with session.begin():
+                    batch = await repo.create_idea_batch(
+                        session,
+                        channel_id=channel,
+                        user_id=user_id,
+                        transcript=transcript,
+                        candidate_ideas=[ideas[0].model_dump()],
+                    )
+                    batch_id = batch.id
+                    await repo.replace_drafts(
+                        session,
+                        batch_id,
+                        [
+                            repo.DraftSpec(text=d.text, platform=DraftPlatform(d.platform))
+                            for d in content.drafts
+                        ],
+                    )
+                    await repo.set_chosen_idea(session, batch_id, 0)
+                    await repo.set_batch_status(session, batch_id, BatchStatus.pending)
+                    drafted = await repo.get_batch(session, batch_id)
+                    assert drafted is not None
+                    blocks = build_draft_blocks(drafted, x_char_limit=settings.x_char_limit)
+                    blocks.append(
+                        {
+                            "type": "context",
+                            "elements": [
+                                {
+                                    "type": "mrkdwn",
+                                    "text": f"_Read {len(raw)} messages → 1 idea worth posting._",
+                                }
+                            ],
+                        }
+                    )
+                    text = fallback_text(drafted)
+            logger.info("draft_post_persisted", channel=channel, draft_count=len(content.drafts))
+        else:
+            # Several ideas — show the ranked shortlist and let the user pick one.
+            async with SessionLocal() as session:
+                async with session.begin():
+                    batch = await repo.create_idea_batch(
+                        session,
+                        channel_id=channel,
+                        user_id=user_id,
+                        transcript=transcript,
+                        candidate_ideas=[idea.model_dump() for idea in ideas],
+                    )
+                    batch_id = batch.id
+                    blocks = build_idea_blocks(batch)
+                    text = idea_fallback_text(batch)
+            logger.info("draft_post_ideas_posted", channel=channel, idea_count=len(ideas))
 
         # Post the living card IN-CHANNEL so we capture the message ts.
         try:

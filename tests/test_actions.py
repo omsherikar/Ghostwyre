@@ -27,7 +27,7 @@ from app.services.content import ContentResult
 from app.services.publisher import PublishError, PublishResult, PublishUnknownError
 from app.services.schemas import Draft
 from app.slack import actions
-from app.slack.actions import parse_action_value, register
+from app.slack.actions import parse_action_value, parse_pick_value, register
 
 CHANNEL = "C123"
 USER = "U456"
@@ -140,6 +140,15 @@ def test_parse_action_value_malformed_raises() -> None:
         parse_action_value(json.dumps({"d": "x"}))
 
 
+def test_parse_pick_value() -> None:
+    b = str(uuid.uuid4())
+    assert parse_pick_value(json.dumps({"b": b, "i": 2})) == (b, 2)
+    assert parse_pick_value(json.dumps({"b": b, "i": "0"})) == (b, 0)  # str index coerced
+    # Malformed / missing -> (None, None), never raises.
+    assert parse_pick_value("not json") == (None, None)
+    assert parse_pick_value(json.dumps({"b": b})) == (None, None)
+
+
 # --------------------------------------------------------------------------- #
 # DB-backed handler tests.
 # --------------------------------------------------------------------------- #
@@ -171,6 +180,67 @@ async def _seed_pending_batch(
             await repo.set_batch_message_ts(session, batch.id, CHANNEL, TS)
             batch_id = batch.id
             draft_ids = [d.id for d in batch.drafts]
+    return batch_id, draft_ids
+
+
+_IDEAS: list[dict[str, Any]] = [
+    {
+        "summary": "Shipped dark mode",
+        "angle": "Ship ugly.",
+        "score": 90,
+        "evidence": ["a: shipped"],
+    },
+    {"summary": "Killed a feature", "angle": "Saying no.", "score": 70, "evidence": ["b: killed"]},
+]
+
+
+async def _seed_selecting_batch(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    ideas: list[dict[str, Any]] | None = None,
+) -> Any:
+    """A `selecting` batch with ranked ideas and no drafts yet (the pre-pick state)."""
+    async with sessionmaker() as session:
+        async with session.begin():
+            batch = await repo.create_idea_batch(
+                session,
+                channel_id=CHANNEL,
+                user_id=USER,
+                transcript=TRANSCRIPT,
+                candidate_ideas=ideas if ideas is not None else _IDEAS,
+            )
+            await repo.set_batch_message_ts(session, batch.id, CHANNEL, TS)
+            batch_id = batch.id
+    return batch_id
+
+
+async def _seed_drafted_batch(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    draft_texts: list[str],
+    platform: DraftPlatform = DraftPlatform.x,
+) -> Any:
+    """A `pending` batch already drafted from idea 0 (post-pick state) — what
+    Regenerate operates on. Returns (batch_id, draft_ids)."""
+    async with sessionmaker() as session:
+        async with session.begin():
+            batch = await repo.create_idea_batch(
+                session,
+                channel_id=CHANNEL,
+                user_id=USER,
+                transcript=TRANSCRIPT,
+                candidate_ideas=_IDEAS,
+            )
+            new = await repo.replace_drafts(
+                session,
+                batch.id,
+                [repo.DraftSpec(text=t, platform=platform) for t in draft_texts],
+            )
+            await repo.set_chosen_idea(session, batch.id, 0)
+            await repo.set_batch_status(session, batch.id, BatchStatus.pending)
+            await repo.set_batch_message_ts(session, batch.id, CHANNEL, TS)
+            batch_id = batch.id
+            draft_ids = [d.id for d in new]
     return batch_id, draft_ids
 
 
@@ -404,12 +474,12 @@ async def test_regenerate_replaces_drafts_and_records_event(
     async def fake_generate(*args: Any, **kwargs: Any) -> ContentResult:
         return ContentResult(postworthy=True, drafts=new_drafts)
 
-    monkeypatch.setattr(actions, "generate_post_drafts", fake_generate)
+    monkeypatch.setattr(actions, "generate_idea_drafts", fake_generate)
     fake_app = FakeApp()
     register(fake_app)  # type: ignore[arg-type]
     callbacks = fake_app.callbacks
 
-    batch_id, draft_ids = await _seed_pending_batch(
+    batch_id, draft_ids = await _seed_drafted_batch(
         test_sessionmaker, draft_texts=["old-zero", "old-one"]
     )
     value = json.dumps({"b": str(batch_id), "d": str(draft_ids[0])})
@@ -445,10 +515,11 @@ async def test_regenerate_uses_invokers_voice_profile(
     captured: dict[str, Any] = {}
 
     async def fake_generate(*args: Any, **kwargs: Any) -> ContentResult:
-        captured["voices"] = args[1] if len(args) > 1 else kwargs.get("voices")
+        # generate_idea_drafts(idea, transcript, voices, ...) — voices is the 3rd arg.
+        captured["voices"] = args[2] if len(args) > 2 else kwargs.get("voices")
         return ContentResult(postworthy=True, drafts=[Draft(text="fresh")])
 
-    monkeypatch.setattr(actions, "generate_post_drafts", fake_generate)
+    monkeypatch.setattr(actions, "generate_idea_drafts", fake_generate)
     fake_app = FakeApp()
     register(fake_app)  # type: ignore[arg-type]
     callbacks = fake_app.callbacks
@@ -464,7 +535,7 @@ async def test_regenerate_uses_invokers_voice_profile(
                 positioning="testing",
             )
 
-    batch_id, draft_ids = await _seed_pending_batch(test_sessionmaker, draft_texts=["old"])
+    batch_id, draft_ids = await _seed_drafted_batch(test_sessionmaker, draft_texts=["old"])
     value = json.dumps({"b": str(batch_id), "d": str(draft_ids[0])})
 
     await _invoke(callbacks, "regenerate_draft", value=value, client=FakeClient())
@@ -487,12 +558,12 @@ async def test_regenerate_failure_keeps_old_drafts(
     async def fake_generate(*args: Any, **kwargs: Any) -> ContentResult:
         raise RuntimeError("LLM exploded")
 
-    monkeypatch.setattr(actions, "generate_post_drafts", fake_generate)
+    monkeypatch.setattr(actions, "generate_idea_drafts", fake_generate)
     fake_app = FakeApp()
     register(fake_app)  # type: ignore[arg-type]
     callbacks = fake_app.callbacks
 
-    batch_id, draft_ids = await _seed_pending_batch(
+    batch_id, draft_ids = await _seed_drafted_batch(
         test_sessionmaker, draft_texts=["keep-zero", "keep-one"]
     )
     value = json.dumps({"b": str(batch_id), "d": str(draft_ids[0])})
@@ -513,16 +584,18 @@ async def test_regenerate_failure_keeps_old_drafts(
 
 @_db_test
 @_db_loop
-async def test_regenerate_nothing_postworthy(
+async def test_regenerate_without_chosen_idea_noops(
     monkeypatch: pytest.MonkeyPatch,
     test_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
+    # A batch with no recorded chosen idea (e.g. a legacy/direct batch) can't be
+    # re-drafted: Regenerate just re-renders the card and never calls generation.
     monkeypatch.setattr(actions, "SessionLocal", test_sessionmaker)
 
-    async def fake_generate(*args: Any, **kwargs: Any) -> ContentResult:
-        return ContentResult(postworthy=False, drafts=[])
+    async def boom(*args: Any, **kwargs: Any) -> ContentResult:
+        raise AssertionError("generation must not run without a chosen idea")
 
-    monkeypatch.setattr(actions, "generate_post_drafts", fake_generate)
+    monkeypatch.setattr(actions, "generate_idea_drafts", boom)
     fake_app = FakeApp()
     register(fake_app)  # type: ignore[arg-type]
     callbacks = fake_app.callbacks
@@ -533,9 +606,13 @@ async def test_regenerate_nothing_postworthy(
 
     await _invoke(callbacks, "regenerate_draft", value=value, client=client)
 
-    final = json.dumps(client.updates[-1]["blocks"])
-    assert "postworthy" in final.lower()
-    assert not _has_actions_block(client.updates[-1]["blocks"])
+    async with test_sessionmaker() as session:
+        loaded = await repo.get_batch(session, batch_id)
+        assert loaded is not None
+        assert [d.text for d in loaded.drafts] == ["old"]  # unchanged
+        assert not [e for e in loaded.events if e.action is ApprovalAction.regenerate]
+    # The card was re-rendered (still the pending approval card).
+    assert json.dumps(client.updates[-1]["blocks"]).find("old") != -1
 
 
 @_db_test
@@ -565,6 +642,36 @@ async def test_cancel_marks_cancelled_and_records_event(
 
     final_blocks = client.updates[-1]["blocks"]
     assert not _has_actions_block(final_blocks)
+    assert "cancelled" in json.dumps(final_blocks).lower()
+
+
+@_db_test
+@_db_loop
+async def test_cancel_selecting_batch_from_idea_card(
+    monkeypatch: pytest.MonkeyPatch,
+    test_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    # The ranked-idea card's Cancel must cancel a `selecting` batch (regression:
+    # it used to only act on `pending`, leaving the idea card stuck + degenerate).
+    monkeypatch.setattr(actions, "SessionLocal", test_sessionmaker)
+    fake_app = FakeApp()
+    register(fake_app)  # type: ignore[arg-type]
+    callbacks = fake_app.callbacks
+
+    batch_id = await _seed_selecting_batch(test_sessionmaker)
+    value = json.dumps({"b": str(batch_id)})
+    client = FakeClient()
+
+    await _invoke(callbacks, "cancel_batch", value=value, client=client)
+
+    async with test_sessionmaker() as session:
+        loaded = await repo.get_batch(session, batch_id)
+        assert loaded is not None
+        assert loaded.status is BatchStatus.cancelled
+        assert any(e.action is ApprovalAction.cancel for e in loaded.events)
+
+    final_blocks = client.updates[-1]["blocks"]
+    assert not _has_actions_block(final_blocks)  # tombstone, no buttons
     assert "cancelled" in json.dumps(final_blocks).lower()
 
 
@@ -634,12 +741,12 @@ async def test_regenerate_chat_update_failure_persists(
             postworthy=True, drafts=[Draft(text="fresh-zero"), Draft(text="fresh-one")]
         )
 
-    monkeypatch.setattr(actions, "generate_post_drafts", fake_generate)
+    monkeypatch.setattr(actions, "generate_idea_drafts", fake_generate)
     fake_app = FakeApp()
     register(fake_app)  # type: ignore[arg-type]
     callbacks = fake_app.callbacks
 
-    batch_id, draft_ids = await _seed_pending_batch(
+    batch_id, draft_ids = await _seed_drafted_batch(
         test_sessionmaker, draft_texts=["old-zero", "old-one"]
     )
     value = json.dumps({"b": str(batch_id), "d": str(draft_ids[0])})
@@ -679,3 +786,239 @@ async def test_cancel_chat_update_failure_persists(
         assert loaded is not None
         assert loaded.status is BatchStatus.cancelled
         assert any(e.action is ApprovalAction.cancel for e in loaded.events)
+
+
+# --------------------------------------------------------------------------- #
+# reopen_ideas ("Pick a different idea" — back to the shortlist, no re-scan).
+# --------------------------------------------------------------------------- #
+
+
+@_db_test
+@_db_loop
+async def test_reopen_ideas_returns_to_picker(
+    monkeypatch: pytest.MonkeyPatch,
+    test_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    # A pending (drafted) batch can return to the ranked-idea card without a re-scan:
+    # status -> selecting, claim cleared, the stored ideas re-rendered.
+    monkeypatch.setattr(actions, "SessionLocal", test_sessionmaker)
+    fake_app = FakeApp()
+    register(fake_app)  # type: ignore[arg-type]
+    callbacks = fake_app.callbacks
+
+    batch_id, _ = await _seed_drafted_batch(test_sessionmaker, draft_texts=["x post"])
+    value = json.dumps({"b": str(batch_id)})
+    client = FakeClient()
+
+    await _invoke(callbacks, "reopen_ideas", value=value, client=client)
+
+    async with test_sessionmaker() as session:
+        loaded = await repo.get_batch(session, batch_id)
+        assert loaded is not None
+        assert loaded.status is BatchStatus.selecting
+        assert loaded.chosen_idea_index is None  # claim released, ready to re-pick
+
+    # Re-rendered the idea picker (a "Draft this" button per idea), not the draft card.
+    assert "pick_idea" in json.dumps(client.updates[-1]["blocks"])
+
+
+@_db_test
+@_db_loop
+async def test_reopen_ideas_noop_after_publish(
+    monkeypatch: pytest.MonkeyPatch,
+    test_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    # Once published (approved), there's no going back — reopen must not re-arm.
+    monkeypatch.setattr(actions, "SessionLocal", test_sessionmaker)
+    fake_app = FakeApp()
+    register(fake_app)  # type: ignore[arg-type]
+    callbacks = fake_app.callbacks
+
+    batch_id, _ = await _seed_drafted_batch(test_sessionmaker, draft_texts=["x post"])
+    async with test_sessionmaker() as session:
+        async with session.begin():
+            await repo.set_batch_status(session, batch_id, BatchStatus.approved)
+
+    value = json.dumps({"b": str(batch_id)})
+    await _invoke(callbacks, "reopen_ideas", value=value, client=FakeClient())
+
+    async with test_sessionmaker() as session:
+        loaded = await repo.get_batch(session, batch_id)
+        assert loaded is not None
+        assert loaded.status is BatchStatus.approved  # unchanged
+
+
+# --------------------------------------------------------------------------- #
+# pick_idea (the ranked-idea picker -> draft).
+# --------------------------------------------------------------------------- #
+
+
+@_db_test
+@_db_loop
+async def test_pick_idea_drafts_and_flips_to_pending(
+    monkeypatch: pytest.MonkeyPatch,
+    test_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    monkeypatch.setattr(actions, "SessionLocal", test_sessionmaker)
+
+    async def fake_generate(*args: Any, **kwargs: Any) -> ContentResult:
+        return ContentResult(postworthy=True, drafts=[Draft(text="drafted-x")])
+
+    monkeypatch.setattr(actions, "generate_idea_drafts", fake_generate)
+    fake_app = FakeApp()
+    register(fake_app)  # type: ignore[arg-type]
+    callbacks = fake_app.callbacks
+
+    batch_id = await _seed_selecting_batch(test_sessionmaker)
+    value = json.dumps({"b": str(batch_id), "i": 1})  # pick the 2nd idea
+    client = FakeClient()
+
+    await _invoke(callbacks, "pick_idea", value=value, client=client)
+
+    async with test_sessionmaker() as session:
+        loaded = await repo.get_batch(session, batch_id)
+        assert loaded is not None
+        assert loaded.status is BatchStatus.pending
+        assert loaded.chosen_idea_index == 1
+        assert [d.text for d in loaded.drafts] == ["drafted-x"]
+        pick_events = [e for e in loaded.events if e.action is ApprovalAction.pick]
+        assert len(pick_events) == 1
+
+    # interim ("Drafting…") + final approval card.
+    assert len(client.updates) >= 2
+    assert "drafted-x" in json.dumps(client.updates[-1]["blocks"])
+
+
+@_db_test
+@_db_loop
+async def test_pick_idea_lost_claim_does_not_draft(
+    monkeypatch: pytest.MonkeyPatch,
+    test_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    # A concurrent pick that loses the claim (chosen_idea_index already set) must
+    # NOT fire a second LLM draft — the at-most-once drafting CAS.
+    monkeypatch.setattr(actions, "SessionLocal", test_sessionmaker)
+
+    async def boom(*args: Any, **kwargs: Any) -> ContentResult:
+        raise AssertionError("must not draft when the claim is lost")
+
+    monkeypatch.setattr(actions, "generate_idea_drafts", boom)
+    fake_app = FakeApp()
+    register(fake_app)  # type: ignore[arg-type]
+    callbacks = fake_app.callbacks
+
+    batch_id = await _seed_selecting_batch(test_sessionmaker)
+    # Simulate another in-flight pick that already claimed idea 0.
+    async with test_sessionmaker() as session:
+        async with session.begin():
+            await repo.set_chosen_idea(session, batch_id, 0)
+
+    value = json.dumps({"b": str(batch_id), "i": 1})
+    await _invoke(callbacks, "pick_idea", value=value, client=FakeClient())
+
+    async with test_sessionmaker() as session:
+        loaded = await repo.get_batch(session, batch_id)
+        assert loaded is not None
+        assert loaded.status is BatchStatus.selecting  # not drafted
+        assert loaded.chosen_idea_index == 0  # winner's claim untouched
+        assert not [e for e in loaded.events if e.action is ApprovalAction.pick]
+
+
+@_db_test
+@_db_loop
+async def test_pick_idea_uses_invokers_voice(
+    monkeypatch: pytest.MonkeyPatch,
+    test_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    monkeypatch.setattr(actions, "SessionLocal", test_sessionmaker)
+
+    captured: dict[str, Any] = {}
+
+    async def fake_generate(*args: Any, **kwargs: Any) -> ContentResult:
+        captured["voices"] = args[2] if len(args) > 2 else kwargs.get("voices")
+        return ContentResult(postworthy=True, drafts=[Draft(text="drafted")])
+
+    monkeypatch.setattr(actions, "generate_idea_drafts", fake_generate)
+    fake_app = FakeApp()
+    register(fake_app)  # type: ignore[arg-type]
+    callbacks = fake_app.callbacks
+
+    async with test_sessionmaker() as session:
+        async with session.begin():
+            await repo.upsert_voice_profile(
+                session,
+                slack_user_id=USER,
+                platform=DraftPlatform.x,
+                sample_posts=["mine1"],
+                voice_card="USER X VOICE",
+                positioning="testing",
+            )
+    batch_id = await _seed_selecting_batch(test_sessionmaker)
+    value = json.dumps({"b": str(batch_id), "i": 0})
+
+    await _invoke(callbacks, "pick_idea", value=value, client=FakeClient())
+
+    voices = captured["voices"]
+    assert voices is not None
+    assert voices["x"].voice_card == "USER X VOICE"
+
+
+@_db_test
+@_db_loop
+async def test_pick_idea_idempotent_on_nonselecting_batch(
+    monkeypatch: pytest.MonkeyPatch,
+    test_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    # A batch already drafted (pending) must not re-draft on a stray pick click.
+    monkeypatch.setattr(actions, "SessionLocal", test_sessionmaker)
+
+    async def boom(*args: Any, **kwargs: Any) -> ContentResult:
+        raise AssertionError("generation must not run for a non-selecting batch")
+
+    monkeypatch.setattr(actions, "generate_idea_drafts", boom)
+    fake_app = FakeApp()
+    register(fake_app)  # type: ignore[arg-type]
+    callbacks = fake_app.callbacks
+
+    batch_id, _ = await _seed_drafted_batch(test_sessionmaker, draft_texts=["already"])
+    value = json.dumps({"b": str(batch_id), "i": 0})
+    client = FakeClient()
+
+    await _invoke(callbacks, "pick_idea", value=value, client=client)
+
+    # Re-rendered the existing approval card; no new pick event.
+    assert "already" in json.dumps(client.updates[-1]["blocks"])
+    async with test_sessionmaker() as session:
+        loaded = await repo.get_batch(session, batch_id)
+        assert loaded is not None
+        assert not [e for e in loaded.events if e.action is ApprovalAction.pick]
+
+
+@_db_test
+@_db_loop
+async def test_pick_idea_bad_index_shows_notice(
+    monkeypatch: pytest.MonkeyPatch,
+    test_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    monkeypatch.setattr(actions, "SessionLocal", test_sessionmaker)
+
+    async def boom(*args: Any, **kwargs: Any) -> ContentResult:
+        raise AssertionError("generation must not run for an out-of-range idea")
+
+    monkeypatch.setattr(actions, "generate_idea_drafts", boom)
+    fake_app = FakeApp()
+    register(fake_app)  # type: ignore[arg-type]
+    callbacks = fake_app.callbacks
+
+    batch_id = await _seed_selecting_batch(test_sessionmaker, ideas=_IDEAS[:1])  # only index 0
+    value = json.dumps({"b": str(batch_id), "i": 5})  # out of range
+    client = FakeClient()
+
+    await _invoke(callbacks, "pick_idea", value=value, client=client)
+
+    rendered = json.dumps(client.updates[-1]["blocks"]).lower()
+    assert "idea is gone" in rendered or "idea not found" in rendered
+    async with test_sessionmaker() as session:
+        loaded = await repo.get_batch(session, batch_id)
+        assert loaded is not None
+        assert loaded.status is BatchStatus.selecting  # unchanged

@@ -35,6 +35,8 @@ from app.services.publisher import MAX_TWEET_LEN
 APPROVE_ACTION_ID = "approve_draft"
 REGENERATE_ACTION_ID = "regenerate_draft"
 CANCEL_ACTION_ID = "cancel_batch"
+PICK_ACTION_ID = "pick_idea"
+REOPEN_ACTION_ID = "reopen_ideas"
 
 
 def _encode_value(**fields: str) -> str:
@@ -45,6 +47,8 @@ def _encode_value(**fields: str) -> str:
 def fallback_text(batch: DraftBatch) -> str:
     """Short plain-text notification line for the posted/updated card."""
     n = len(batch.drafts)
+    if batch.status == BatchStatus.selecting:
+        return idea_fallback_text(batch)
     if batch.status == BatchStatus.cancelled:
         return "Ghostwyre: drafts cancelled — nothing was published."
     if batch.status == BatchStatus.approved:
@@ -165,23 +169,33 @@ def build_draft_blocks(
     Returns ONLY the blocks list — the caller pairs it with `fallback_text(batch)`
     for the top-level `text` field when posting/updating.
     """
+    if batch.status == BatchStatus.selecting:
+        # A pre-draft batch has no drafts; render the ranked-idea picker instead, so
+        # no caller can ever produce a degenerate, buttonless "drafts" card.
+        return build_idea_blocks(batch)
+
     if batch.status in (BatchStatus.cancelled, BatchStatus.expired):
         return [
             _section("~Drafts cancelled~ — nothing was published. Run /draft-post to start over.")
         ]
 
     if batch.status == BatchStatus.approved:
-        approved = next(
-            (d for d in batch.drafts if d.status == DraftStatus.approved),
-            None,
-        )
-        # Non-empty fallback: an empty section `text` is rejected by Slack. Only
-        # reachable on a contract violation (status=approved with no approved draft).
-        approved_text = approved.text if approved is not None else "_(draft unavailable)_"
-        return [
-            _section(approved_text),
-            _context("*Published (dry-run).*"),
-        ]
+        # Terminal but still useful: show EVERY draft, not just the published one —
+        # the approved (X) draft marked published, the others kept as copy-paste so a
+        # LinkedIn (no-API) draft isn't lost the moment X is approved. No buttons.
+        out: list[dict[str, Any]] = []
+        for draft in sorted(batch.drafts, key=lambda d: d.slot_index):
+            spec = PLATFORMS[str(draft.platform or DraftPlatform.x)]
+            out.append(_section(f"*{spec.label} draft*\n{draft.text}"))
+            if draft.status == DraftStatus.approved:
+                out.append(_context("✅ Published."))
+            else:
+                out.append(_context(f"Copy & paste into {spec.label} — it wasn't auto-published."))
+        # Non-empty fallback: Slack rejects an empty blocks list / empty section text.
+        # Only reachable on a contract violation (status=approved with no drafts).
+        if not out:
+            out = [_section("_(draft unavailable)_"), _context("*Published (dry-run).*")]
+        return out
 
     # Pending: the full interactive card (terminal states handled above).
     drafts = sorted(batch.drafts, key=lambda d: d.slot_index)
@@ -194,6 +208,90 @@ def build_draft_blocks(
     ]
     for draft in drafts:
         blocks.extend(_pending_draft_blocks(batch, draft, x_char_limit))
+    # When the batch was drafted from a ranked shortlist with more than one idea,
+    # offer a way back to the picker (no re-scan — the ideas are stored on the batch).
+    if batch.candidate_ideas and len(batch.candidate_ideas) > 1:
+        blocks.append(
+            {
+                "type": "actions",
+                "block_id": f"idea_actions:{batch.id}:reopen",
+                "elements": [
+                    {
+                        "type": "button",
+                        "action_id": REOPEN_ACTION_ID,
+                        "text": {"type": "plain_text", "text": "← Pick a different idea"},
+                        "value": _encode_value(b=str(batch.id)),
+                    }
+                ],
+            }
+        )
+    return blocks
+
+
+def idea_fallback_text(batch: DraftBatch) -> str:
+    """Plain-text notification line for the ranked-idea (selecting) card."""
+    n = len(batch.candidate_ideas)
+    word = "idea" if n == 1 else "ideas"
+    return f"Ghostwyre found {n} {word} worth posting — pick one to draft."
+
+
+def _pick_button(batch: DraftBatch, index: int) -> dict[str, Any]:
+    return {
+        "type": "button",
+        "action_id": PICK_ACTION_ID,
+        "text": {"type": "plain_text", "text": "Draft this"},
+        "style": "primary",
+        "value": _encode_value(b=str(batch.id), i=str(index)),
+    }
+
+
+def build_idea_blocks(batch: DraftBatch) -> list[dict[str, Any]]:
+    """Render the ranked-idea shortlist for a `selecting` batch (pure, no I/O).
+
+    Each idea (from `batch.candidate_ideas`: summary/angle/score/evidence) gets a
+    rank+score line, its suggested angle, the verbatim transcript quotes that
+    surfaced it, and a *Draft this* button carrying ids only (batch id + idea
+    index — never the idea text). One Cancel button closes the batch.
+    """
+    ideas = batch.candidate_ideas
+    n = len(ideas)
+    word = "idea" if n == 1 else "ideas"
+    blocks: list[dict[str, Any]] = [
+        _header("Ideas worth posting"),
+        _context(
+            f"I read <#{batch.slack_channel_id}> and found {n} {word} worth posting — "
+            "pick one to draft."
+        ),
+    ]
+    for i, idea in enumerate(ideas):
+        blocks.append(_divider())
+        summary = idea.get("summary", "")
+        score = idea.get("score")
+        head = f"*{i + 1}. {summary}*"
+        if isinstance(score, int):
+            head += f"  ·  _score {score}/100_"
+        blocks.append(_section(head))
+        angle = idea.get("angle", "")
+        if angle:
+            blocks.append(_context(f"💡 {angle}"))
+        evidence = idea.get("evidence") or []
+        if evidence:
+            quoted = "\n".join(f"> {q}" for q in evidence)
+            blocks.append(_section(f"*From the conversation:*\n{quoted}"))
+        blocks.append(
+            {
+                "type": "actions",
+                "block_id": f"idea_actions:{batch.id}:{i}",
+                "elements": [_pick_button(batch, i)],
+            }
+        )
+    blocks.append(
+        {
+            "type": "actions",
+            "block_id": f"idea_actions:{batch.id}:cancel",
+            "elements": [_cancel_button(batch)],
+        }
+    )
     return blocks
 
 

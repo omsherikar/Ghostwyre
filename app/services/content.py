@@ -21,8 +21,8 @@ from typing import Any
 from app.config import Settings
 from app.logging import get_logger
 from app.platforms import PLATFORMS
-from app.services.llm import LLMClient, extract_postworthy, generate_platform_draft
-from app.services.schemas import Draft, PostworthyItem
+from app.services.llm import LLMClient, extract_postworthy, generate_platform_draft, rank_ideas
+from app.services.schemas import Draft, PostworthyItem, RankedIdea
 
 logger = get_logger(__name__)
 
@@ -51,6 +51,18 @@ class ContentResult:
     drafts: list[Draft]
 
 
+@dataclass(frozen=True)
+class RankResult:
+    """Outcome of scanning + ranking a channel's candidate ideas.
+
+    `postworthy` is False when nothing is worth posting (empty `ideas`); otherwise
+    `ideas` is the top-K shortlist, highest score first, each with evidence quotes.
+    """
+
+    postworthy: bool
+    ideas: list[RankedIdea]
+
+
 def _tokens(text: str) -> set[str]:
     return {w for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) > 2}
 
@@ -68,32 +80,50 @@ def select_exemplars(sample_posts: list[str], items: list[PostworthyItem], n: in
     return ranked[:n]
 
 
-async def generate_post_drafts(
+async def rank_channel_ideas(
+    transcript: str,
+    *,
+    client: LLMClient,
+    settings: Settings,
+) -> RankResult:
+    """Extract candidate ideas, then score + dedupe + rank them with evidence.
+
+    The cheap `extract_postworthy` gate short-circuits an idle channel with no
+    ranking call. Otherwise `rank_ideas` scores every candidate, merges duplicates,
+    and attaches transcript quotes; we keep the top `idea_shortlist_size`. Never
+    logs transcript or idea text.
+    """
+    extracted = await extract_postworthy(transcript, client=client, settings=settings)
+    if not extracted.items:
+        logger.info("content_nothing_postworthy", item_count=0)
+        return RankResult(postworthy=False, ideas=[])
+
+    ranked = await rank_ideas(extracted.items, transcript, client=client, settings=settings)
+    top = ranked.ideas[: settings.idea_shortlist_size]
+    logger.info("content_ideas_ranked", item_count=len(extracted.items), shortlist=len(top))
+    return RankResult(postworthy=bool(top), ideas=top)
+
+
+async def generate_idea_drafts(
+    idea: RankedIdea,
     transcript: str,
     voices: dict[str, VoiceContext],
     *,
     client: LLMClient,
     settings: Settings,
 ) -> ContentResult:
-    """Extract postworthy items, then draft one post per platform in *voices*.
+    """Draft one post per platform for a SINGLE chosen *idea*, in the user's voice.
 
-    If extraction yields no items, short-circuit with an empty, not-postworthy
-    result and make no drafting calls. Otherwise generate one draft per platform,
-    each with that platform's voice card + exemplars + strategy. Never logs
-    transcript, item, exemplar, or draft text.
+    The idea's summary + angle become the insight handed to `generate_platform_draft`
+    (and drive exemplar selection); the transcript still grounds the post in real
+    specifics. Never logs transcript, exemplar, idea, or draft text.
     """
-    extracted = await extract_postworthy(transcript, client=client, settings=settings)
-    if not extracted.items:
-        logger.info("content_nothing_postworthy", item_count=0)
-        return ContentResult(postworthy=False, drafts=[])
-
+    items = [PostworthyItem(summary=idea.summary, reason=idea.angle)]
     drafts: list[Draft] = []
     for platform, ctx in voices.items():
-        exemplars = select_exemplars(
-            ctx.sample_posts, extracted.items, settings.voice_exemplar_count
-        )
+        exemplars = select_exemplars(ctx.sample_posts, items, settings.voice_exemplar_count)
         draft = await generate_platform_draft(
-            extracted.items,
+            items,
             platform,
             voice_card=ctx.voice_card,
             positioning=ctx.positioning,
@@ -104,7 +134,7 @@ async def generate_post_drafts(
         )
         drafts.append(draft)
 
-    logger.info("content_drafts_ready", item_count=len(extracted.items), draft_count=len(drafts))
+    logger.info("content_idea_drafts_ready", draft_count=len(drafts))
     return ContentResult(postworthy=True, drafts=drafts)
 
 

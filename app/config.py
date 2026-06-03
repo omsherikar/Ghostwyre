@@ -29,6 +29,9 @@ class Settings(BaseSettings):
         default=None, description="Channel /draft-post reads from"
     )
     message_fetch_limit: int = Field(default=50, description="How many recent messages to pull")
+    # How many recent messages /draft-post scans when finding + ranking ideas. Larger
+    # than message_fetch_limit so it can sift a busy channel down to the few worth posting.
+    idea_scan_limit: int = Field(default=150, description="Messages scanned for idea ranking")
 
     # --- LLM (Phase 2) ---
     # Which provider services/llm.py talks to. "anthropic" (default) uses Claude;
@@ -45,6 +48,11 @@ class Settings(BaseSettings):
     # post + a developed X post), so it needs more headroom than extraction.
     extract_max_tokens: int = 1024
     draft_max_tokens: int = 4096
+    # Ranking returns several scored ideas with evidence quotes — needs more than
+    # extraction but far less than long-form drafting.
+    rank_max_tokens: int = 2048
+    # How many top-ranked ideas to surface for the user to pick from.
+    idea_shortlist_size: int = 3
     # The X approve/publish char ceiling. Default allows long posts (X Premium's
     # long-post max); set lower to restrict. Posting >280 needs X Premium.
     x_char_limit: int = 25000

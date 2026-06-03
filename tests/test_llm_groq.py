@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from app.config import Settings
-from app.services.llm import extract_postworthy, generate_platform_draft
+from app.services.llm import extract_postworthy, generate_platform_draft, rank_ideas
 from app.services.schemas import PostworthyItem
 
 
@@ -119,3 +119,25 @@ async def test_groq_generate_platform_draft() -> None:
     )
     assert result.text == "draft one"
     assert result.platform == "linkedin"
+
+
+@pytest.mark.asyncio
+async def test_groq_rank_ideas() -> None:
+    payload = {
+        "ideas": [
+            {"summary": "Shipped X", "angle": "Ship it.", "score": 75, "evidence": ["a: shipped"]}
+        ]
+    }
+    client = FakeGroqClient([json.dumps(payload)])
+    result = await rank_ideas(
+        [PostworthyItem(summary="Shipped X", reason="A win.")],
+        "a: shipped X today",
+        client=client,  # type: ignore[arg-type]
+        settings=_settings(),
+    )
+    assert len(result.ideas) == 1
+    assert result.ideas[0].score == 75
+    # Groq JSON mode + the configured model.
+    kwargs = client.chat.completions.calls[0]
+    assert kwargs["model"] == "test-model"
+    assert kwargs["response_format"] == {"type": "json_object"}
