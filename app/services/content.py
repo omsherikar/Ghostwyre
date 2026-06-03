@@ -16,6 +16,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from app.config import Settings
 from app.logging import get_logger
@@ -114,6 +115,26 @@ def seed_voices(voice_md: str) -> dict[str, VoiceContext]:
         platform: VoiceContext(voice_card=voice_md, positioning="", sample_posts=[])
         for platform in PLATFORMS
     }
+
+
+def build_voices(profiles: dict[str, Any], voice_md: str) -> dict[str, VoiceContext]:
+    """Build the per-platform `voices` map: each platform uses the user's stored
+    profile (voice card + positioning + sample posts) when present, else falls back
+    to the `voice.md` seed. *profiles* is a platform→VoiceProfile map from the repo;
+    call this while its rows are still attached to a session (it reads their fields).
+    """
+    voices: dict[str, VoiceContext] = {}
+    for platform in PLATFORMS:
+        profile = profiles.get(platform)
+        if profile is None:
+            voices[platform] = VoiceContext(voice_card=voice_md, positioning="", sample_posts=[])
+        else:
+            voices[platform] = VoiceContext(
+                voice_card=profile.voice_card,
+                positioning=profile.positioning,
+                sample_posts=list(profile.sample_posts),
+            )
+    return voices
 
 
 def load_voice(path: Path | None = None) -> str:
