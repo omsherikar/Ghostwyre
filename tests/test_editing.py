@@ -30,6 +30,7 @@ class FakeApp:
     def __init__(self) -> None:
         self.actions: dict[str, Any] = {}
         self.views: dict[str, Any] = {}
+        self.commands: dict[str, Any] = {}
 
     def action(self, action_id: str) -> Any:
         def deco(fn: Any) -> Any:
@@ -44,6 +45,21 @@ class FakeApp:
             return fn
 
         return deco
+
+    def command(self, name: str) -> Any:
+        def deco(fn: Any) -> Any:
+            self.commands[name] = fn
+            return fn
+
+        return deco
+
+
+class RespondRecorder:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def __call__(self, **kwargs: Any) -> None:
+        self.calls.append(kwargs)
 
 
 class FakeClient:
@@ -261,3 +277,84 @@ async def test_edit_noop_on_nonpending_batch(
         loaded = await repo.get_batch(session, b)
         assert loaded is not None
         assert loaded.drafts[0].text == "original"  # unchanged
+
+
+# --------------------------------------------------------------------------- #
+# /voice — see & prune what's been learned.
+# --------------------------------------------------------------------------- #
+
+
+@_db_test
+@_db_loop
+async def test_voice_lists_rules_with_forget_buttons(
+    monkeypatch: pytest.MonkeyPatch,
+    test_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    monkeypatch.setattr(editing, "SessionLocal", test_sessionmaker)
+    async with test_sessionmaker() as session:
+        async with session.begin():
+            await repo.add_voice_memory(
+                session,
+                slack_user_id="Uvoice",
+                platform=DraftPlatform.x,
+                instructions=["No emojis.", "Be terse."],
+            )
+    app = _callbacks()
+    respond = RespondRecorder()
+
+    await app.commands["/voice"](ack=_ack, command={"user_id": "Uvoice"}, respond=respond)
+
+    assert len(respond.calls) == 1
+    rendered = json.dumps(respond.calls[0]["blocks"])
+    assert "No emojis." in rendered and "Be terse." in rendered
+    assert "forget_memory" in rendered  # a Forget button per rule
+
+
+@_db_test
+@_db_loop
+async def test_voice_empty_state(
+    monkeypatch: pytest.MonkeyPatch,
+    test_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    monkeypatch.setattr(editing, "SessionLocal", test_sessionmaker)
+    app = _callbacks()
+    respond = RespondRecorder()
+
+    await app.commands["/voice"](ack=_ack, command={"user_id": "Uvoice_empty"}, respond=respond)
+
+    assert "Nothing yet" in json.dumps(respond.calls[0]["blocks"])
+
+
+@_db_test
+@_db_loop
+async def test_forget_memory_deletes_and_rerenders(
+    monkeypatch: pytest.MonkeyPatch,
+    test_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    monkeypatch.setattr(editing, "SessionLocal", test_sessionmaker)
+    async with test_sessionmaker() as session:
+        async with session.begin():
+            rows = await repo.add_voice_memory(
+                session,
+                slack_user_id="Uforget",
+                platform=DraftPlatform.x,
+                instructions=["keep me", "forget me"],
+            )
+    forget_id = next(r.id for r in rows if r.instruction == "forget me")
+    app = _callbacks()
+    respond = RespondRecorder()
+
+    await app.actions["forget_memory"](
+        ack=_ack,
+        body={"user": {"id": "Uforget"}},
+        action={"value": json.dumps({"m": str(forget_id)})},
+        respond=respond,
+    )
+
+    assert respond.calls and respond.calls[-1].get("replace_original") is True
+    rendered = json.dumps(respond.calls[-1]["blocks"])
+    assert "keep me" in rendered
+    assert "forget me" not in rendered
+    async with test_sessionmaker() as session:
+        remaining = await repo.list_voice_memory(session, "Uforget")
+    assert {r.instruction for r in remaining} == {"keep me"}

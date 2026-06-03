@@ -24,7 +24,7 @@ from app.db import SessionLocal
 from app.db.models import BatchStatus, DraftPlatform
 from app.logging import get_logger
 from app.services.llm import build_client, distill_edit_memory
-from app.slack.blocks import build_draft_blocks, fallback_text
+from app.slack.blocks import build_draft_blocks, build_voice_blocks, fallback_text, voice_fallback
 
 logger = get_logger(__name__)
 
@@ -152,3 +152,34 @@ def register(app: AsyncApp) -> None:
                         instructions=notes.instructions,
                     )
             logger.info("edit_learned", draft_id=str(d), rule_count=len(notes.instructions))
+
+    @app.command("/voice")
+    async def voice_command(ack: Any, command: dict[str, Any], respond: Any) -> None:
+        await ack()
+        user_id = command["user_id"]
+        async with SessionLocal() as session:
+            rows = await repo.list_voice_memory(session, user_id)
+            blocks = build_voice_blocks(rows)
+            text = voice_fallback(len(rows))
+        await respond(blocks=blocks, text=text)
+        logger.info("voice_listed", rule_count=len(rows))
+
+    @app.action("forget_memory")
+    async def forget_memory(
+        ack: Any, body: dict[str, Any], action: dict[str, Any], respond: Any
+    ) -> None:
+        await ack()
+        try:
+            data = json.loads(action.get("value") or "{}")
+            m = uuid.UUID(data["m"])
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+            return
+        user_id = body["user"]["id"]
+        async with SessionLocal() as session:
+            async with session.begin():
+                await repo.delete_voice_memory(session, m)
+            rows = await repo.list_voice_memory(session, user_id)
+            blocks = build_voice_blocks(rows)
+            text = voice_fallback(len(rows))
+        await respond(replace_original=True, blocks=blocks, text=text)
+        logger.info("voice_forgot", rule_count=len(rows))
