@@ -484,3 +484,44 @@ async def test_claim_idea_for_drafting_wins_once_then_loses(session: AsyncSessio
 
 async def test_claim_idea_for_drafting_unknown_returns_false(session: AsyncSession) -> None:
     assert await repo.claim_idea_for_drafting(session, uuid.uuid4(), 0) is False
+
+
+async def test_add_and_get_voice_memory_grouped_by_platform(session: AsyncSession) -> None:
+    await repo.add_voice_memory(
+        session, slack_user_id=USER, platform=DraftPlatform.x, instructions=["no emojis", "short"]
+    )
+    await repo.add_voice_memory(
+        session, slack_user_id=USER, platform=DraftPlatform.linkedin, instructions=["use lists"]
+    )
+    mem = await repo.get_voice_memory(session, USER, limit_per_platform=10)
+    assert set(mem) == {"x", "linkedin"}
+    assert set(mem["x"]) == {"no emojis", "short"}
+    assert mem["linkedin"] == ["use lists"]
+
+
+async def test_get_voice_memory_caps_per_platform(session: AsyncSession) -> None:
+    await repo.add_voice_memory(
+        session, slack_user_id="Ucap", platform=DraftPlatform.x, instructions=["a", "b", "c"]
+    )
+    mem = await repo.get_voice_memory(session, "Ucap", limit_per_platform=2)
+    assert len(mem["x"]) == 2  # capped
+    assert set(mem["x"]) <= {"a", "b", "c"}
+
+
+async def test_get_voice_memory_absent_returns_empty(session: AsyncSession) -> None:
+    assert await repo.get_voice_memory(session, "nobody", limit_per_platform=10) == {}
+
+
+async def test_list_and_delete_voice_memory(session: AsyncSession) -> None:
+    rows = await repo.add_voice_memory(
+        session, slack_user_id="Udel", platform=DraftPlatform.x, instructions=["a", "b"]
+    )
+    listed = await repo.list_voice_memory(session, "Udel")
+    assert {r.instruction for r in listed} == {"a", "b"}
+    assert all(isinstance(r.id, uuid.UUID) for r in listed)  # rows carry ids for /voice
+
+    assert await repo.delete_voice_memory(session, rows[0].id) is True
+    remaining = await repo.list_voice_memory(session, "Udel")
+    assert {r.instruction for r in remaining} == {"b"}
+    # Deleting an unknown id is a no-op.
+    assert await repo.delete_voice_memory(session, uuid.uuid4()) is False

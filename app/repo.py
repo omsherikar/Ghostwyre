@@ -28,6 +28,7 @@ from app.db.models import (
     DraftBatch,
     DraftPlatform,
     DraftStatus,
+    VoiceMemory,
     VoiceProfile,
 )
 
@@ -346,3 +347,61 @@ async def get_voice_profiles(session: AsyncSession, slack_user_id: str) -> dict[
         select(VoiceProfile).where(VoiceProfile.slack_user_id == slack_user_id)
     )
     return {str(p.platform): p for p in result.scalars().all()}
+
+
+async def add_voice_memory(
+    session: AsyncSession,
+    *,
+    slack_user_id: str,
+    platform: DraftPlatform,
+    instructions: list[str],
+    source: str = "edit",
+) -> list[VoiceMemory]:
+    """Append distilled style rules for (user, platform). Flush only."""
+    rows = [
+        VoiceMemory(slack_user_id=slack_user_id, platform=platform, instruction=text, source=source)
+        for text in instructions
+    ]
+    session.add_all(rows)
+    await session.flush()
+    return rows
+
+
+async def get_voice_memory(
+    session: AsyncSession, slack_user_id: str, *, limit_per_platform: int
+) -> dict[str, list[str]]:
+    """The user's most recent learned rules per platform (newest first, capped at
+    *limit_per_platform*) as plain strings, keyed by platform value — for drafting."""
+    result = await session.execute(
+        select(VoiceMemory)
+        .where(VoiceMemory.slack_user_id == slack_user_id)
+        .order_by(VoiceMemory.created_at.desc())
+    )
+    out: dict[str, list[str]] = {}
+    for row in result.scalars().all():
+        bucket = out.setdefault(str(row.platform), [])
+        if len(bucket) < limit_per_platform:
+            bucket.append(row.instruction)
+    return out
+
+
+async def list_voice_memory(session: AsyncSession, slack_user_id: str) -> list[VoiceMemory]:
+    """All of the user's learned rules (rows with ids), platform then newest first —
+    for the /voice view."""
+    result = await session.execute(
+        select(VoiceMemory)
+        .where(VoiceMemory.slack_user_id == slack_user_id)
+        .order_by(VoiceMemory.platform, VoiceMemory.created_at.desc())
+    )
+    return list(result.scalars().all())
+
+
+async def delete_voice_memory(session: AsyncSession, memory_id: uuid.UUID) -> bool:
+    """Delete one learned rule by id; True iff a row was removed."""
+    result = await session.execute(
+        delete(VoiceMemory)
+        .where(VoiceMemory.id == memory_id)
+        .execution_options(synchronize_session="fetch")
+    )
+    await session.flush()
+    return cast("CursorResult[Any]", result).rowcount == 1
