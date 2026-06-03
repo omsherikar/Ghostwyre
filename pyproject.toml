@@ -3,6 +3,7 @@ name = "ghostwyre"
 version = "0.1.0"
 description = "Slack-native AI agent: reads channel messages, drafts posts in your voice, publishes to X after approval."
 readme = "README.md"
+license = "Apache-2.0"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "fastapi>=0.115",

@@ -214,3 +214,9 @@ PostgreSQL · tweepy (X, optional extra).
 
 Build plans: `dev-docs/chat-to-content-agent-v1-plan.md` (v1) and
 `dev-docs/chat-to-content-agent-v2-plan.md` (v2, Pillars A–D).
+
+## License
+
+Licensed under the **Apache License 2.0** — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+You may use, modify, and distribute it (incl. commercially) with attribution; it
+includes an explicit patent grant and comes with no warranty.
