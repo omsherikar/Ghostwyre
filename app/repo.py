@@ -28,6 +28,7 @@ from app.db.models import (
     DraftBatch,
     DraftPlatform,
     DraftStatus,
+    VoiceMemory,
     VoiceProfile,
 )
 
@@ -247,6 +248,19 @@ async def set_draft_status(
     await session.flush()
 
 
+async def set_draft_text(
+    session: AsyncSession,
+    draft_id: uuid.UUID,
+    text: str,
+) -> None:
+    """Replace a single draft's text in place (a user's edit); raise LookupError if missing."""
+    draft = await session.get(Draft, draft_id)
+    if draft is None:
+        raise LookupError(f"Draft {draft_id} not found")
+    draft.text = text
+    await session.flush()
+
+
 async def set_batch_status(
     session: AsyncSession,
     batch_id: uuid.UUID,
@@ -346,3 +360,71 @@ async def get_voice_profiles(session: AsyncSession, slack_user_id: str) -> dict[
         select(VoiceProfile).where(VoiceProfile.slack_user_id == slack_user_id)
     )
     return {str(p.platform): p for p in result.scalars().all()}
+
+
+async def add_voice_memory(
+    session: AsyncSession,
+    *,
+    slack_user_id: str,
+    platform: DraftPlatform,
+    instructions: list[str],
+    source: str = "edit",
+) -> list[VoiceMemory]:
+    """Append distilled style rules for (user, platform). Flush only."""
+    rows = [
+        VoiceMemory(slack_user_id=slack_user_id, platform=platform, instruction=text, source=source)
+        for text in instructions
+    ]
+    session.add_all(rows)
+    await session.flush()
+    return rows
+
+
+async def get_voice_memory(
+    session: AsyncSession, slack_user_id: str, *, limit_per_platform: int
+) -> dict[str, list[str]]:
+    """The user's most recent learned rules per platform (newest first, capped at
+    *limit_per_platform*) as plain strings, keyed by platform value — for drafting."""
+    result = await session.execute(
+        select(VoiceMemory)
+        .where(VoiceMemory.slack_user_id == slack_user_id)
+        .order_by(VoiceMemory.created_at.desc())
+    )
+    out: dict[str, list[str]] = {}
+    for row in result.scalars().all():
+        bucket = out.setdefault(str(row.platform), [])
+        if len(bucket) < limit_per_platform:
+            bucket.append(row.instruction)
+    return out
+
+
+async def list_voice_memory(
+    session: AsyncSession, slack_user_id: str, *, limit: int = 40
+) -> list[VoiceMemory]:
+    """The user's learned rules (rows with ids), newest first, capped at *limit* — for
+    the /voice view. The cap keeps the rendered card under Slack's 50-block ceiling;
+    build_voice_blocks regroups by platform."""
+    result = await session.execute(
+        select(VoiceMemory)
+        .where(VoiceMemory.slack_user_id == slack_user_id)
+        .order_by(VoiceMemory.created_at.desc())
+        .limit(limit)
+    )
+    return list(result.scalars().all())
+
+
+async def delete_voice_memory(
+    session: AsyncSession, memory_id: uuid.UUID, *, slack_user_id: str
+) -> bool:
+    """Delete one of *slack_user_id*'s learned rules by id; True iff a row was removed.
+
+    The owner filter is mandatory: a forged/replayed Forget click carrying another
+    user's rule id must not delete it.
+    """
+    result = await session.execute(
+        delete(VoiceMemory)
+        .where(VoiceMemory.id == memory_id, VoiceMemory.slack_user_id == slack_user_id)
+        .execution_options(synchronize_session="fetch")
+    )
+    await session.flush()
+    return cast("CursorResult[Any]", result).rowcount == 1

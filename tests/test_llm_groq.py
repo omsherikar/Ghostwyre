@@ -13,7 +13,12 @@ from typing import Any
 import pytest
 
 from app.config import Settings
-from app.services.llm import extract_postworthy, generate_platform_draft, rank_ideas
+from app.services.llm import (
+    distill_edit_memory,
+    extract_postworthy,
+    generate_platform_draft,
+    rank_ideas,
+)
 from app.services.schemas import PostworthyItem
 
 
@@ -140,4 +145,19 @@ async def test_groq_rank_ideas() -> None:
     # Groq JSON mode + the configured model.
     kwargs = client.chat.completions.calls[0]
     assert kwargs["model"] == "test-model"
+    assert kwargs["response_format"] == {"type": "json_object"}
+
+
+@pytest.mark.asyncio
+async def test_groq_distill_edit_memory() -> None:
+    client = FakeGroqClient([json.dumps({"instructions": ["No emojis."]})])
+    result = await distill_edit_memory(
+        "I shipped it 🎉",
+        "Shipped it.",
+        "x",
+        client=client,  # type: ignore[arg-type]
+        settings=_settings(),
+    )
+    assert result.instructions == ["No emojis."]
+    kwargs = client.chat.completions.calls[0]
     assert kwargs["response_format"] == {"type": "json_object"}

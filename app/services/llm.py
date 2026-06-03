@@ -37,6 +37,7 @@ from app.services.schemas import (
     PostworthyResult,
     RankedIdeas,
     VoiceCard,
+    VoiceMemoryNotes,
 )
 
 logger = get_logger(__name__)
@@ -370,13 +371,15 @@ async def generate_platform_draft(
     transcript: str,
     client: LLMClient,
     settings: Settings,
+    memory: list[str] | None = None,
 ) -> Draft:
     """Draft ONE post for *platform*, in the user's voice, grounded in the transcript.
 
     System blocks: the draft rules + the platform's strategy + the user's voice
-    card (cached). The user's positioning, the insights, the transcript, and the
-    exemplar posts go in the user message. Retries the call+parse once. Never logs
-    the transcript, exemplars, or draft text.
+    card (cached) + any learned `memory` rules from past edits (cached). The user's
+    positioning, the insights, the transcript, and the exemplar posts go in the user
+    message. Retries the call+parse once. Never logs the transcript, exemplars,
+    memory, or draft text.
     """
     system: list[TextBlockParam] = [
         {"type": "text", "text": DRAFT_SYSTEM},
@@ -387,6 +390,18 @@ async def generate_platform_draft(
             "cache_control": {"type": "ephemeral"},
         },
     ]
+    if memory:
+        rules = "\n".join(f"- {rule}" for rule in memory)
+        system.append(
+            {
+                "type": "text",
+                "text": (
+                    "Sticky preferences learned from this user's past edits — "
+                    f"follow these exactly:\n{rules}"
+                ),
+                "cache_control": {"type": "ephemeral"},
+            }
+        )
     result = await _structured_call(
         client=client,
         settings=settings,
@@ -456,4 +471,65 @@ async def distill_voice_profile(
         max_tokens=settings.draft_max_tokens,
     )
     logger.info("voice_distill_complete", platform=platform, post_count=len(posts))
+    return result
+
+
+MEMORY_DISTILL_SCHEMA = {
+    "type": "object",
+    "properties": {"instructions": {"type": "array", "items": {"type": "string"}}},
+    "required": ["instructions"],
+    "additionalProperties": False,
+}
+
+MEMORY_DISTILL_SYSTEM = """\
+You compare a social-media draft we generated with the user's edited version and infer
+the DURABLE style preferences their edit reveals, so future drafts match without being
+told again.
+
+Return up to 3 `instructions`: short, concrete, GENERAL style rules phrased as commands
+("Don't open with 'I'.", "Cut hype words like 'unlock'.", "Use shorter paragraphs.",
+"No emojis.").
+
+Strict rules:
+- Infer ONLY style / voice / formatting changes — NEVER facts specific to this post
+  (names, numbers, the topic). Those are not durable rules.
+- If the edit is trivial (a typo, a tiny wording tweak, or no real change), return an
+  empty list. Never invent rules to fill it.
+- Each instruction must generalize to future posts and read as a direct command."""
+
+
+def _render_memory_request(original: str, edited: str, platform: str) -> str:
+    """Build the memory-distillation prompt from the original + edited draft."""
+    return (
+        f"Platform: {platform}\n\n"
+        f"The draft we generated:\n\n{original}\n\n"
+        f"The user's edited version:\n\n{edited}\n\n"
+        "What durable style rules does this edit reveal?"
+    )
+
+
+async def distill_edit_memory(
+    original: str,
+    edited: str,
+    platform: str,
+    *,
+    client: LLMClient,
+    settings: Settings,
+) -> VoiceMemoryNotes:
+    """Distill durable style rules from a user's edit (original -> edited draft).
+
+    Returns an empty list for trivial edits. Reuses the structured-output +
+    retry-once machinery. Never logs the draft or the distilled rules.
+    """
+    system: list[TextBlockParam] = [{"type": "text", "text": MEMORY_DISTILL_SYSTEM}]
+    result = await _structured_call(
+        client=client,
+        settings=settings,
+        system=system,
+        user=_render_memory_request(original, edited, platform),
+        schema=MEMORY_DISTILL_SCHEMA,
+        model_cls=VoiceMemoryNotes,
+        max_tokens=settings.memory_max_tokens,
+    )
+    logger.info("memory_distill_complete", platform=platform, rule_count=len(result.instructions))
     return result

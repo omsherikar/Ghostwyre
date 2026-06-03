@@ -199,3 +199,30 @@ class VoiceProfile(Base):
         onupdate=func.now(),
         nullable=False,
     )
+
+
+class VoiceMemory(Base):
+    """A durable, learned style rule for one (slack_user_id, platform), distilled
+    from how the user edits drafts ("don't open with 'I'", "cut hype words").
+
+    Append-only and kept SEPARATE from VoiceProfile so it accrues even for users
+    on the voice.md seed (no profile). Fed into drafting on top of the voice card.
+    `instruction` is user-derived content at rest — never log it, never put it in a
+    Slack button value.
+    """
+
+    __tablename__ = "voice_memory"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    slack_user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    platform: Mapped[DraftPlatform] = mapped_column(
+        Enum(DraftPlatform, native_enum=False, values_callable=lambda e: [m.value for m in e]),
+        nullable=False,
+    )
+    instruction: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="edit", server_default="edit"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )

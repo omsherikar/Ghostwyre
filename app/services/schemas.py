@@ -54,3 +54,9 @@ class VoiceCard(BaseModel):
 
     voice_card: str
     positioning: str
+
+
+class VoiceMemoryNotes(BaseModel):
+    """Durable style rules distilled from how a user edited a draft (may be empty)."""
+
+    instructions: list[str]

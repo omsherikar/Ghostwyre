@@ -965,6 +965,44 @@ async def test_pick_idea_uses_invokers_voice(
 
 @_db_test
 @_db_loop
+async def test_pick_idea_feeds_learned_memory(
+    monkeypatch: pytest.MonkeyPatch,
+    test_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    # Drafting a picked idea pulls the invoker's learned rules into the voice context.
+    monkeypatch.setattr(actions, "SessionLocal", test_sessionmaker)
+
+    captured: dict[str, Any] = {}
+
+    async def fake_generate(*args: Any, **kwargs: Any) -> ContentResult:
+        captured["voices"] = args[2] if len(args) > 2 else kwargs.get("voices")
+        return ContentResult(postworthy=True, drafts=[Draft(text="drafted")])
+
+    monkeypatch.setattr(actions, "generate_idea_drafts", fake_generate)
+    fake_app = FakeApp()
+    register(fake_app)  # type: ignore[arg-type]
+    callbacks = fake_app.callbacks
+
+    async with test_sessionmaker() as session:
+        async with session.begin():
+            await repo.add_voice_memory(
+                session,
+                slack_user_id=USER,
+                platform=DraftPlatform.x,
+                instructions=["No emojis."],
+            )
+    batch_id = await _seed_selecting_batch(test_sessionmaker)
+    value = json.dumps({"b": str(batch_id), "i": 0})
+
+    await _invoke(callbacks, "pick_idea", value=value, client=FakeClient())
+
+    voices = captured["voices"]
+    assert voices is not None
+    assert "No emojis." in voices["x"].memory
+
+
+@_db_test
+@_db_loop
 async def test_pick_idea_idempotent_on_nonselecting_batch(
     monkeypatch: pytest.MonkeyPatch,
     test_sessionmaker: async_sessionmaker[AsyncSession],

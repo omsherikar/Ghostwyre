@@ -18,6 +18,7 @@ from app.db.models import (
     DraftBatch,
     DraftPlatform,
     DraftStatus,
+    VoiceMemory,
     VoiceProfile,
 )
 
@@ -124,5 +125,14 @@ def test_voice_profile_columns_and_unique() -> None:
     names = {c.name for c in VoiceProfile.__table__.constraints if c.name is not None}
     assert "uq_voice_user_platform" in names
     # platform stored as VARCHAR (native_enum=False), like the other enums.
+    compiled = cols.platform.type.compile(dialect=postgresql.dialect())
+    assert compiled.startswith("VARCHAR")
+
+
+def test_voice_memory_columns() -> None:
+    cols = VoiceMemory.__table__.c
+    assert {"slack_user_id", "platform", "instruction", "source"} <= set(cols.keys())
+    # Append-only learned rules — separate table from voice_profile, no unique pair.
+    assert VoiceMemory.__tablename__ == "voice_memory"
     compiled = cols.platform.type.compile(dialect=postgresql.dialect())
     assert compiled.startswith("VARCHAR")

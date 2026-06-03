@@ -32,11 +32,13 @@ _VOICE_PATH = Path(__file__).resolve().parents[2] / "voice.md"
 @dataclass(frozen=True)
 class VoiceContext:
     """The voice inputs for ONE platform: the distilled voice card, the user's
-    positioning, and their real sample posts (exemplars are picked from these)."""
+    positioning, their real sample posts (exemplars are picked from these), and any
+    learned `memory` rules distilled from their past edits (Pillar D)."""
 
     voice_card: str
     positioning: str
     sample_posts: list[str]
+    memory: list[str]
 
 
 @dataclass(frozen=True)
@@ -128,6 +130,7 @@ async def generate_idea_drafts(
             voice_card=ctx.voice_card,
             positioning=ctx.positioning,
             exemplars=exemplars,
+            memory=ctx.memory,
             transcript=transcript,
             client=client,
             settings=settings,
@@ -140,29 +143,38 @@ async def generate_idea_drafts(
 
 def seed_voices(voice_md: str) -> dict[str, VoiceContext]:
     """Fallback `voices` map for users without a profile: the static `voice.md`
-    as every platform's voice card, no positioning, no exemplars."""
+    as every platform's voice card, no positioning, no exemplars, no memory."""
     return {
-        platform: VoiceContext(voice_card=voice_md, positioning="", sample_posts=[])
+        platform: VoiceContext(voice_card=voice_md, positioning="", sample_posts=[], memory=[])
         for platform in PLATFORMS
     }
 
 
-def build_voices(profiles: dict[str, Any], voice_md: str) -> dict[str, VoiceContext]:
+def build_voices(
+    profiles: dict[str, Any],
+    memory: dict[str, list[str]],
+    voice_md: str,
+) -> dict[str, VoiceContext]:
     """Build the per-platform `voices` map: each platform uses the user's stored
     profile (voice card + positioning + sample posts) when present, else falls back
-    to the `voice.md` seed. *profiles* is a platform→VoiceProfile map from the repo;
-    call this while its rows are still attached to a session (it reads their fields).
+    to the `voice.md` seed, plus any learned `memory` rules for that platform.
+    *profiles* is a platform→VoiceProfile map and *memory* a platform→rules map from
+    the repo; call this while the profile rows are still attached to a session.
     """
     voices: dict[str, VoiceContext] = {}
     for platform in PLATFORMS:
+        rules = memory.get(platform, [])
         profile = profiles.get(platform)
         if profile is None:
-            voices[platform] = VoiceContext(voice_card=voice_md, positioning="", sample_posts=[])
+            voices[platform] = VoiceContext(
+                voice_card=voice_md, positioning="", sample_posts=[], memory=rules
+            )
         else:
             voices[platform] = VoiceContext(
                 voice_card=profile.voice_card,
                 positioning=profile.positioning,
                 sample_posts=list(profile.sample_posts),
+                memory=rules,
             )
     return voices
 

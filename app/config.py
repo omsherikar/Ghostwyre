@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     rank_max_tokens: int = 2048
     # How many top-ranked ideas to surface for the user to pick from.
     idea_shortlist_size: int = 3
+    # Feedback memory: learned rules (per platform) fed to each draft, and the output
+    # budget for distilling rules from a single edit.
+    voice_memory_limit: int = 10
+    memory_max_tokens: int = 512
     # The X approve/publish char ceiling. Default allows long posts (X Premium's
     # long-post max); set lower to restrict. Posting >280 needs X Premium.
     x_char_limit: int = 25000

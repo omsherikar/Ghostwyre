@@ -136,6 +136,9 @@ async def test_migration_upgrade_creates_tables() -> None:
     # v2.1 adds the ranked-idea columns to draft_batch.
     assert {"candidate_ideas", "chosen_idea_index"} <= await _draft_batch_columns()
 
+    # v2.2 adds the voice_memory table.
+    assert "voice_memory" in tables
+
 
 @pytest.mark.slow
 async def test_migration_downgrade_drops_tables() -> None:

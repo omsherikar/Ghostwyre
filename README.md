@@ -6,14 +6,16 @@ conversation, **ranks the ideas actually worth posting** — each scored, with t
 real quotes that sparked it — and shows you a shortlist to **pick** from. Pick one
 and it drafts a long **LinkedIn** post and a long **X** post **in your voice** —
 each generated in its own pass against that platform's voice and strategy, grounded
-in what was actually said. You can publish the X draft with one **Approve** click
+in what was actually said. **Edit** any draft before approving and Ghostwyre learns
+your tweaks — distilling durable style rules that steer every future draft (see them
+anytime with `/voice`). You can publish the X draft with one **Approve** click
 (LinkedIn is copy-paste). The human-in-the-loop approval gate is mandatory; nothing
 is ever auto-posted.
 
 It's a small, deliberately-narrow portfolio project that takes one workflow
 end-to-end with production-minded plumbing: async everywhere, a multi-step LLM
-pipeline (extract → rank → draft), persisted approval state, and an at-most-once
-publish gate.
+pipeline (extract → rank → draft) that **learns from your edits**, persisted approval
+state, and an at-most-once publish gate.
 
 ## Demo
 
@@ -41,12 +43,15 @@ flowchart TD
     VP -.voice card + exemplars.-> GEN
     GEN --> CARD[blocks.py<br/>approval card]
     CARD -->|chat.update| U
-    U -->|Approve · Regenerate · Cancel| ACT
+    U -->|Approve · Edit · Regenerate · Cancel| ACT
+    ACT -->|Edit: save + distill_edit_memory| VM[(VoiceMemory<br/>learned rules)]
+    VM -.sticky rules.-> GEN
     ACT -->|Approve only| PUB[publisher<br/>DryRun / XPublisher]
     PUB -->|tweet| X([X / Twitter])
     ACT -->|audit + status| DB[(Postgres<br/>candidate_ideas · drafts)]
     U -->|/post-history| CMD
     CMD -->|list_published| DB
+    U -->|/voice: see · forget rules| VM
 ```
 
 - **Ingest** (`app/slack/ingest.py`) pulls recent messages (up to `IDEA_SCAN_LIMIT`),
@@ -71,11 +76,17 @@ flowchart TD
   voice card, positioning, strategy, and a few of your real posts as exemplars
   (lightweight relevance), grounded in the actual transcript. Structured JSON output
   + prompt caching on the system prompt and voice card. Works on Claude or Groq.
-- **Approve** (`app/slack/{blocks,actions}.py`) persists the batch first, posts one
-  living Block Kit card (each draft labelled by platform), and resolves every
+- **Approve / Edit** (`app/slack/{blocks,actions}.py`) persists the batch first, posts
+  one living Block Kit card (each draft labelled by platform), and resolves every
   button by id. Approve appears only for the **X** draft within `X_CHAR_LIMIT`;
-  LinkedIn (and over-limit X) is copy-paste. Regenerate re-drafts the same chosen
-  idea, Cancel dismisses — each idempotent.
+  LinkedIn (and over-limit X) is copy-paste. **Edit** opens a modal to tweak a draft;
+  Regenerate re-drafts the same chosen idea; Cancel dismisses — each idempotent.
+- **Learn** (`app/slack/editing.py` → `llm.distill_edit_memory`) — when you Edit a
+  draft, Ghostwyre diffs your version against its own and distills durable style rules
+  ("don't open with 'I'", "no emojis") into a per-`(user, platform)` `VoiceMemory`.
+  Those rules ride along (as an extra cached system block) on every future draft, so
+  it gets better the more you use it. `/voice` lists what's been learned, with a
+  **Forget** button to prune a bad rule. Only edits are mined — never approve/regen.
 - **Publish** (`app/services/publisher.py`, `x_publisher.py`) is a `PublisherClient`
   Protocol: `DryRunPublisher` by default, `XPublisher` (tweepy) when `PUBLISHER=x`.
 
@@ -93,10 +104,10 @@ make lint           # ruff + mypy
 Requires Python 3.12, Docker, and [uv](https://docs.astral.sh/uv/).
 
 **Slack setup:** create an app, enable Socket Mode, and enable **Interactivity**
-(the `/setup` voice modal needs it). Add scopes `commands`, `channels:history`,
+(the `/setup` and Edit modals need it). Add scopes `commands`, `channels:history`,
 `chat:write`, and `im:write` (so Ghostwyre can DM you the `/setup` confirmation).
-Register three slash commands — `/setup`, `/draft-post`, and `/post-history`.
-Invite the bot to a channel, then run the commands there.
+Register four slash commands — `/setup`, `/draft-post`, `/post-history`, and
+`/voice`. Invite the bot to a channel, then run the commands there.
 
 ## Teaching your voice (`/setup`)
 
@@ -107,6 +118,19 @@ distills a per-platform voice card and stores it; from then on `/draft-post` (an
 `/setup` any time to refresh it. Until you do, drafts use the generic `voice.md`
 seed — onboarding is optional but makes the drafts sound like you. Your pasted
 posts are user content at rest and are never logged.
+
+## Learning from your edits (Edit + `/voice`)
+
+Every draft card has an **Edit** button: tweak the post, hit Save, and that becomes
+the text Approve publishes. Ghostwyre also compares your edit to its own draft and
+distills the *durable* style rules behind your change ("don't open with 'I'", "no
+emojis", "shorter paragraphs") into your voice memory — so it doesn't make the same
+mistake next time. The rules ride along on every future draft (and Regenerate); the
+edit itself only fixes the current post. Run **`/voice`** to see what's been learned
+per platform and hit **Forget** to drop a rule that's drifting. Only your edits are
+learned from — not approvals or regenerates — so the signal stays intentional.
+`VOICE_MEMORY_LIMIT` caps how many rules feed each draft. (Very long drafts can't be
+edited in Slack's modal — copy-paste those instead.)
 
 ## Publishing to X
 

@@ -109,7 +109,10 @@ def register(app: AsyncApp) -> None:
             # One clear idea — skip the picker; draft it now (keep a transparency line).
             async with SessionLocal() as session:
                 profiles = await repo.get_voice_profiles(session, user_id)
-                voices = build_voices(profiles, voice)
+                memory = await repo.get_voice_memory(
+                    session, user_id, limit_per_platform=settings.voice_memory_limit
+                )
+                voices = build_voices(profiles, memory, voice)
             try:
                 content = await generate_idea_drafts(
                     ideas[0], transcript, voices, client=anthropic_client, settings=settings

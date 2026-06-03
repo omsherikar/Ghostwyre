@@ -28,6 +28,7 @@ from app.db.models import (
     DraftBatch,
     DraftPlatform,
     DraftStatus,
+    VoiceMemory,
 )
 from app.platforms import PLATFORMS
 from app.services.publisher import MAX_TWEET_LEN
@@ -37,6 +38,12 @@ REGENERATE_ACTION_ID = "regenerate_draft"
 CANCEL_ACTION_ID = "cancel_batch"
 PICK_ACTION_ID = "pick_idea"
 REOPEN_ACTION_ID = "reopen_ideas"
+EDIT_ACTION_ID = "edit_draft"
+FORGET_ACTION_ID = "forget_memory"
+
+# Slack `plain_text_input` caps `initial_value` at 3000 chars; stay safely under so
+# `views_open` never rejects a pre-filled edit modal. Longer drafts are copy-paste-only.
+EDIT_MAX_LEN = 2900
 
 
 def _encode_value(**fields: str) -> str:
@@ -97,6 +104,15 @@ def _regenerate_button(batch: DraftBatch, draft: Draft) -> dict[str, Any]:
     }
 
 
+def _edit_button(batch: DraftBatch, draft: Draft) -> dict[str, Any]:
+    return {
+        "type": "button",
+        "action_id": EDIT_ACTION_ID,
+        "text": {"type": "plain_text", "text": "Edit"},
+        "value": _encode_value(b=str(batch.id), d=str(draft.id)),
+    }
+
+
 def _cancel_button(batch: DraftBatch) -> dict[str, Any]:
     return {
         "type": "button",
@@ -147,6 +163,12 @@ def _pending_draft_blocks(
         blocks.append(
             _context("Too long to auto-publish — copy & paste, or raise X_CHAR_LIMIT (X Premium).")
         )
+    # Edit lets the user tweak the draft before approving (and teaches the voice).
+    # Skip it for drafts too long for Slack's modal input — copy-paste those instead.
+    if len(draft.text) <= EDIT_MAX_LEN:
+        elements.append(_edit_button(batch, draft))
+    else:
+        blocks.append(_context("Too long to edit in Slack — copy-paste to tweak it."))
     elements.append(_regenerate_button(batch, draft))
     elements.append(_cancel_button(batch))
     blocks.append(
@@ -292,6 +314,54 @@ def build_idea_blocks(batch: DraftBatch) -> list[dict[str, Any]]:
             "elements": [_cancel_button(batch)],
         }
     )
+    return blocks
+
+
+def voice_fallback(count: int) -> str:
+    """Plain-text notification line for the /voice card."""
+    if count == 0:
+        return "Ghostwyre hasn't learned any voice rules yet."
+    word = "rule" if count == 1 else "rules"
+    return f"Ghostwyre has learned {count} voice {word} from your edits."
+
+
+def _forget_button(memory_id: Any) -> dict[str, Any]:
+    return {
+        "type": "button",
+        "action_id": FORGET_ACTION_ID,
+        "text": {"type": "plain_text", "text": "Forget"},
+        "style": "danger",
+        "value": _encode_value(m=str(memory_id)),
+    }
+
+
+def build_voice_blocks(rows: list[VoiceMemory]) -> list[dict[str, Any]]:
+    """Render the learned voice rules grouped by platform (pure, no I/O), each with a
+    Forget button. *rows* come from `repo.list_voice_memory`; read their fields while
+    still attached to a session. Button values carry only the rule id."""
+    blocks: list[dict[str, Any]] = [_header("What I've learned about your voice")]
+    if not rows:
+        blocks.append(_section("Nothing yet — *Edit* a draft and I'll learn the changes you make."))
+        return blocks
+
+    by_platform: dict[str, list[VoiceMemory]] = {}
+    for row in rows:
+        by_platform.setdefault(str(row.platform), []).append(row)
+
+    for platform in PLATFORMS:  # stable, known order
+        rules = by_platform.get(platform)
+        if not rules:
+            continue
+        blocks.append(_divider())
+        blocks.append(_section(f"*{PLATFORMS[platform].label}*"))
+        for row in rules:
+            blocks.append(
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": f"• {row.instruction}"},
+                    "accessory": _forget_button(row.id),
+                }
+            )
     return blocks
 
 
