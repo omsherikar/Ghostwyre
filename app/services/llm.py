@@ -93,6 +93,7 @@ async def _raw_completion(
     system: list[TextBlockParam],
     user: str,
     schema: dict[str, Any],
+    max_tokens: int,
 ) -> str:
     """Provider-specific call returning the model's raw (expected-JSON) text.
 
@@ -111,7 +112,7 @@ async def _raw_completion(
         groq_client = cast(Any, client)
         groq_resp = await groq_client.chat.completions.create(
             model=settings.groq_model,
-            max_tokens=1024,
+            max_tokens=max_tokens,
             messages=[
                 {"role": "system", "content": system_text},
                 {"role": "user", "content": user},
@@ -126,7 +127,7 @@ async def _raw_completion(
     anthropic_client = cast(AsyncAnthropic, client)
     resp = await anthropic_client.messages.create(
         model=settings.llm_model,
-        max_tokens=1024,
+        max_tokens=max_tokens,
         system=system,
         messages=[{"role": "user", "content": user}],
         output_config={"format": {"type": "json_schema", "schema": schema}},
@@ -145,6 +146,7 @@ async def _structured_call[ModelT: BaseModel](
     user: str,
     schema: dict[str, Any],
     model_cls: type[ModelT],
+    max_tokens: int,
 ) -> ModelT:
     """Call the model (via the provider-specific path), then parse + validate.
 
@@ -156,7 +158,12 @@ async def _structured_call[ModelT: BaseModel](
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         try:
             raw = await _raw_completion(
-                client=client, settings=settings, system=system, user=user, schema=schema
+                client=client,
+                settings=settings,
+                system=system,
+                user=user,
+                schema=schema,
+                max_tokens=max_tokens,
             )
             data = loads_lenient(raw)
             return model_cls.model_validate(data)
@@ -197,6 +204,7 @@ async def extract_postworthy(
         user=transcript,
         schema=EXTRACT_SCHEMA,
         model_cls=PostworthyResult,
+        max_tokens=settings.extract_max_tokens,
     )
     logger.info("postworthy_extract_complete", item_count=len(result.items))
     return result
@@ -209,8 +217,11 @@ DRAFT_SCHEMA = {
             "type": "array",
             "items": {
                 "type": "object",
-                "properties": {"text": {"type": "string"}},
-                "required": ["text"],
+                "properties": {
+                    "platform": {"type": "string", "enum": ["x", "linkedin"]},
+                    "text": {"type": "string"},
+                },
+                "required": ["platform", "text"],
                 "additionalProperties": False,
             },
         }
@@ -220,28 +231,41 @@ DRAFT_SCHEMA = {
 }
 
 DRAFT_SYSTEM = """\
-You write candidate social-media posts (for X) in the user's voice.
+You write social-media posts in the user's voice, grounded in a real team
+conversation. You are given: the postworthy insight(s) extracted from the chat,
+the conversation transcript itself, and a separate voice guide.
 
-The user's voice is provided as a separate guide. Treat it as the source of \
-truth for tone, style, and what is allowed.
+Pick the single strongest insight and write TWO posts about it — one for LinkedIn
+and one for X — each developed and specific, drawing on the ACTUAL details of the
+conversation (what was built, the numbers, the decision, the lesson), not generic
+platitudes.
+
+Per platform:
+- linkedin: a developed, multi-paragraph post (roughly 600-1300 characters). Open
+  with a hook, develop the insight with the concrete specifics, close with a crisp
+  takeaway. Short paragraphs separated by blank lines read well.
+- x: a developed long-form post — go past a single line; lead with the sharpest
+  point and build the argument. Substantive, not a teaser.
 
 Strict rules:
-- Produce 2-3 DISTINCT drafts, each taking a different angle on the material.
-- Each draft is a complete, standalone post — not a thread, not a continuation.
-- Each draft must be at most 280 characters.
-- Strictly follow the voice and tone rules in the provided guide.
+- Treat the voice guide as the source of truth for tone and style; match it.
+- Ground every post in the conversation's real specifics. Never invent facts.
+- Never include anything confidential: secrets or credentials, customer or client
+  names, internal financials, or unreleased plans.
 - Do NOT add hashtags or emojis unless the voice guide explicitly allows them.
-- Output only the posts: no preamble, no commentary, no numbering."""
+- Output exactly one `linkedin` post and one `x` post. No preamble, no commentary."""
 
 
-def _render_items(items: list[PostworthyItem], max_drafts: int) -> str:
-    """Render postworthy *items* into a readable prompt with a draft instruction."""
-    lines = [f"- {item.summary} (why: {item.reason})" for item in items]
-    body = "\n".join(lines)
+def _render_draft_request(items: list[PostworthyItem], transcript: str) -> str:
+    """Build the draft prompt: the postworthy insight(s) + the grounding transcript."""
+    insights = "\n".join(f"- {item.summary} (why: {item.reason})" for item in items)
     return (
-        "Here are the postworthy items to draft from:\n"
-        f"{body}\n\n"
-        f"Write up to {max_drafts} distinct posts in the user's voice."
+        "Postworthy insight(s) from the conversation:\n"
+        f"{insights}\n\n"
+        "The conversation transcript (ground the posts in these real specifics):\n"
+        f"{transcript}\n\n"
+        "Write one LinkedIn post and one X post about the strongest insight, in the "
+        "user's voice."
     )
 
 
@@ -249,15 +273,17 @@ async def generate_drafts(
     items: list[PostworthyItem],
     voice: str,
     *,
+    transcript: str,
     client: LLMClient,
     settings: Settings,
 ) -> DraftSet:
-    """Draft candidate posts from postworthy *items*, in the user's *voice*.
+    """Draft a long LinkedIn post + a long X post from postworthy *items*.
 
-    The stable draft instructions and the *voice* guide are sent as system
-    blocks; the voice block carries `cache_control` so system+voice cache
-    together across calls. Retries the call+parse exactly once on failure.
-    Never logs the drafts' text or the transcript.
+    Both are written in the user's *voice* and grounded in the *transcript* (the
+    actual conversation). The stable draft instructions and the voice guide are
+    sent as system blocks; the voice block carries `cache_control` so system+voice
+    cache together. Uses the larger draft token budget. Retries the call+parse
+    exactly once on failure. Never logs the transcript or draft text.
     """
     system: list[TextBlockParam] = [
         {"type": "text", "text": DRAFT_SYSTEM},
@@ -267,9 +293,10 @@ async def generate_drafts(
         client=client,
         settings=settings,
         system=system,
-        user=_render_items(items, settings.max_drafts),
+        user=_render_draft_request(items, transcript),
         schema=DRAFT_SCHEMA,
         model_cls=DraftSet,
+        max_tokens=settings.draft_max_tokens,
     )
     logger.info("drafts_generate_complete", draft_count=len(result.drafts))
     return result

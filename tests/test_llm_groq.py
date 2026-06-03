@@ -106,12 +106,19 @@ async def test_groq_none_content_retries_then_raises() -> None:
 
 @pytest.mark.asyncio
 async def test_groq_generate_drafts() -> None:
-    payload = {"drafts": [{"text": "draft one"}, {"text": "draft two"}]}
+    payload = {
+        "drafts": [
+            {"platform": "linkedin", "text": "draft one"},
+            {"platform": "x", "text": "draft two"},
+        ]
+    }
     client = FakeGroqClient([json.dumps(payload)])
     result = await generate_drafts(
         [PostworthyItem(summary="Shipped X", reason="A win.")],
         "Write casually. No hashtags.",
+        transcript="alice: shipped X today",
         client=client,  # type: ignore[arg-type]
         settings=_settings(),
     )
     assert [d.text for d in result.drafts] == ["draft one", "draft two"]
+    assert [d.platform for d in result.drafts] == ["linkedin", "x"]
