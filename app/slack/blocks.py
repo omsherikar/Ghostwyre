@@ -35,6 +35,7 @@ from app.services.publisher import MAX_TWEET_LEN
 APPROVE_ACTION_ID = "approve_draft"
 REGENERATE_ACTION_ID = "regenerate_draft"
 CANCEL_ACTION_ID = "cancel_batch"
+PICK_ACTION_ID = "pick_idea"
 
 
 def _encode_value(**fields: str) -> str:
@@ -194,6 +195,73 @@ def build_draft_blocks(
     ]
     for draft in drafts:
         blocks.extend(_pending_draft_blocks(batch, draft, x_char_limit))
+    return blocks
+
+
+def idea_fallback_text(batch: DraftBatch) -> str:
+    """Plain-text notification line for the ranked-idea (selecting) card."""
+    n = len(batch.candidate_ideas)
+    word = "idea" if n == 1 else "ideas"
+    return f"Ghostwyre found {n} {word} worth posting — pick one to draft."
+
+
+def _pick_button(batch: DraftBatch, index: int) -> dict[str, Any]:
+    return {
+        "type": "button",
+        "action_id": PICK_ACTION_ID,
+        "text": {"type": "plain_text", "text": "Draft this"},
+        "style": "primary",
+        "value": _encode_value(b=str(batch.id), i=str(index)),
+    }
+
+
+def build_idea_blocks(batch: DraftBatch) -> list[dict[str, Any]]:
+    """Render the ranked-idea shortlist for a `selecting` batch (pure, no I/O).
+
+    Each idea (from `batch.candidate_ideas`: summary/angle/score/evidence) gets a
+    rank+score line, its suggested angle, the verbatim transcript quotes that
+    surfaced it, and a *Draft this* button carrying ids only (batch id + idea
+    index — never the idea text). One Cancel button closes the batch.
+    """
+    ideas = batch.candidate_ideas
+    n = len(ideas)
+    word = "idea" if n == 1 else "ideas"
+    blocks: list[dict[str, Any]] = [
+        _header("Ideas worth posting"),
+        _context(
+            f"I read <#{batch.slack_channel_id}> and found {n} {word} worth posting — "
+            "pick one to draft."
+        ),
+    ]
+    for i, idea in enumerate(ideas):
+        blocks.append(_divider())
+        summary = idea.get("summary", "")
+        score = idea.get("score")
+        head = f"*{i + 1}. {summary}*"
+        if isinstance(score, int):
+            head += f"  ·  _score {score}/100_"
+        blocks.append(_section(head))
+        angle = idea.get("angle", "")
+        if angle:
+            blocks.append(_context(f"💡 {angle}"))
+        evidence = idea.get("evidence") or []
+        if evidence:
+            quoted = "\n".join(f"> {q}" for q in evidence)
+            blocks.append(_section(f"*From the conversation:*\n{quoted}"))
+        blocks.append(
+            {
+                "type": "actions",
+                "block_id": f"idea_actions:{batch.id}:{i}",
+                "elements": [_pick_button(batch, i)],
+            }
+        )
+    blocks.append(
+        {
+            "type": "actions",
+            "block_id": f"idea_actions:{batch.id}:cancel",
+            "elements": [_cancel_button(batch)],
+        }
+    )
     return blocks
 
 
