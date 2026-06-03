@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     groq_api_key: str | None = None
     groq_model: str = "llama-3.3-70b-versatile"
     max_drafts: int = 3
+    # How many of the user's real past posts to few-shot as voice exemplars.
+    voice_exemplar_count: int = 4
     # Output-token budgets per step. Drafting is long-form (a developed LinkedIn
     # post + a developed X post), so it needs more headroom than extraction.
     extract_max_tokens: int = 1024

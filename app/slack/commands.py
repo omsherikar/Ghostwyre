@@ -21,7 +21,7 @@ from app.config import get_settings
 from app.db import SessionLocal
 from app.db.models import DraftPlatform
 from app.logging import get_logger
-from app.services.content import generate_post_drafts, load_voice
+from app.services.content import generate_post_drafts, load_voice, seed_voices
 from app.services.llm import build_client
 from app.services.schemas import Draft
 from app.slack.blocks import (
@@ -83,7 +83,7 @@ def register(app: AsyncApp) -> None:
 
         try:
             result = await generate_post_drafts(
-                transcript, voice, client=anthropic_client, settings=settings
+                transcript, seed_voices(voice), client=anthropic_client, settings=settings
             )
         except Exception:
             logger.exception("draft_post_generation_failed", channel=channel)

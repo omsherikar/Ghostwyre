@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from app.config import Settings
-from app.services.llm import extract_postworthy, generate_drafts
+from app.services.llm import extract_postworthy, generate_platform_draft
 from app.services.schemas import PostworthyItem
 
 
@@ -105,20 +105,17 @@ async def test_groq_none_content_retries_then_raises() -> None:
 
 
 @pytest.mark.asyncio
-async def test_groq_generate_drafts() -> None:
-    payload = {
-        "drafts": [
-            {"platform": "linkedin", "text": "draft one"},
-            {"platform": "x", "text": "draft two"},
-        ]
-    }
-    client = FakeGroqClient([json.dumps(payload)])
-    result = await generate_drafts(
+async def test_groq_generate_platform_draft() -> None:
+    client = FakeGroqClient([json.dumps({"text": "draft one"})])
+    result = await generate_platform_draft(
         [PostworthyItem(summary="Shipped X", reason="A win.")],
-        "Write casually. No hashtags.",
+        "linkedin",
+        voice_card="Write casually. No hashtags.",
+        positioning="",
+        exemplars=[],
         transcript="alice: shipped X today",
         client=client,  # type: ignore[arg-type]
         settings=_settings(),
     )
-    assert [d.text for d in result.drafts] == ["draft one", "draft two"]
-    assert [d.platform for d in result.drafts] == ["linkedin", "x"]
+    assert result.text == "draft one"
+    assert result.platform == "linkedin"

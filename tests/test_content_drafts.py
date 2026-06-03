@@ -1,4 +1,4 @@
-"""Tests for LLM step B — drafting in the user's voice (mocked, no network)."""
+"""Tests for per-platform drafting in the user's voice (mocked, no network)."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from typing import Any
 import pytest
 
 from app.config import Settings
-from app.services.llm import generate_drafts
-from app.services.schemas import DraftSet, PostworthyItem
+from app.services.llm import generate_platform_draft
+from app.services.schemas import Draft, PostworthyItem
 
 
 class FakeTextBlock:
@@ -54,68 +54,69 @@ def _items() -> list[PostworthyItem]:
 
 
 @pytest.mark.asyncio
-async def test_generate_returns_parsed_drafts_per_platform() -> None:
-    payload = {
-        "drafts": [
-            {"platform": "linkedin", "text": "Just shipped dark mode. Here's what I learned…"},
-            {"platform": "x", "text": "Spent the day hunting a race condition. The race is over."},
-        ]
-    }
-    client = FakeClient([json.dumps(payload)])
-    result = await generate_drafts(
+async def test_generate_platform_draft_returns_one_draft() -> None:
+    client = FakeClient([json.dumps({"text": "Just shipped dark mode. Here's what I learned…"})])
+    result = await generate_platform_draft(
         _items(),
-        "Casual, witty, lowercase-friendly. No hashtags.",
+        "linkedin",
+        voice_card="Casual, witty. No hashtags.",
+        positioning="A builder who ships.",
+        exemplars=["an old post about shipping"],
         transcript="alice: shipped dark mode today",
         client=client,  # type: ignore[arg-type]
         settings=_settings(),
     )
-    assert isinstance(result, DraftSet)
-    assert len(result.drafts) == 2
-    assert {d.platform for d in result.drafts} == {"linkedin", "x"}
-    assert result.drafts[0].platform == "linkedin"
+    assert isinstance(result, Draft)
+    assert result.platform == "linkedin"
+    assert result.text.startswith("Just shipped")
     assert len(client.messages.calls) == 1
 
 
 @pytest.mark.asyncio
-async def test_generate_retries_once_on_invalid_then_succeeds() -> None:
-    valid = json.dumps(
-        {"drafts": [{"platform": "x", "text": "We landed the migration with zero downtime."}]}
-    )
+async def test_generate_platform_draft_retries_once_on_invalid() -> None:
+    valid = json.dumps({"text": "We landed the migration with zero downtime."})
     client = FakeClient(["this is not json {", valid])
-    result = await generate_drafts(
+    result = await generate_platform_draft(
         _items(),
-        "Direct and confident.",
+        "x",
+        voice_card="Direct and confident.",
+        positioning="",
+        exemplars=[],
         transcript="carol: we landed the migration",
         client=client,  # type: ignore[arg-type]
         settings=_settings(),
     )
-    assert len(result.drafts) == 1
-    assert result.drafts[0].text == "We landed the migration with zero downtime."
-    assert result.drafts[0].platform == "x"
+    assert result.text == "We landed the migration with zero downtime."
+    assert result.platform == "x"
     assert len(client.messages.calls) == 2
 
 
 @pytest.mark.asyncio
-async def test_generate_passes_structured_output_cached_voice_and_grounding() -> None:
+async def test_generate_platform_draft_prompt_has_voice_strategy_exemplars_grounding() -> None:
     transcript = "alice: shipped X and signups rose 12 percent overnight"
-    client = FakeClient([json.dumps({"drafts": [{"platform": "x", "text": "A post."}]})])
+    client = FakeClient([json.dumps({"text": "A post."})])
     settings = _settings()
-    await generate_drafts(
+    await generate_platform_draft(
         _items(),
-        "My distinctive voice guide.",
+        "linkedin",
+        voice_card="My distinctive voice guide.",
+        positioning="Known for shipping.",
+        exemplars=["EXEMPLAR-POST-ALPHA"],
         transcript=transcript,
         client=client,  # type: ignore[arg-type]
         settings=settings,
     )
     kwargs = client.messages.calls[0]
     assert kwargs["output_config"]["format"]["type"] == "json_schema"
-    assert "schema" in kwargs["output_config"]["format"]
     assert kwargs["model"] == settings.llm_model
-    # Drafting uses the larger token budget for long-form output.
     assert kwargs["max_tokens"] == settings.draft_max_tokens
-    # The transcript is fed into the draft prompt so drafts are grounded.
-    assert transcript in kwargs["messages"][0]["content"]
-    system = kwargs["system"]
-    voice_block = system[1]
-    assert voice_block["text"] == "My distinctive voice guide."
-    assert voice_block["cache_control"] == {"type": "ephemeral"}
+
+    system_texts = [b["text"] for b in kwargs["system"]]
+    assert any("My distinctive voice guide." in t for t in system_texts)  # voice card
+    assert any("LinkedIn" in t for t in system_texts)  # platform strategy
+    assert any(b.get("cache_control") == {"type": "ephemeral"} for b in kwargs["system"])
+
+    user_msg = kwargs["messages"][0]["content"]
+    assert transcript in user_msg  # grounded in the conversation
+    assert "EXEMPLAR-POST-ALPHA" in user_msg  # the user's real post as an exemplar
+    assert "Known for shipping." in user_msg  # positioning

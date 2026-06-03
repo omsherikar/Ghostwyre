@@ -33,7 +33,7 @@ from app.db import SessionLocal
 from app.db.models import ApprovalAction, BatchStatus, DraftBatch, DraftPlatform, DraftStatus
 from app.logging import get_logger
 from app.platforms import PLATFORMS
-from app.services.content import generate_post_drafts, load_voice
+from app.services.content import generate_post_drafts, load_voice, seed_voices
 from app.services.llm import build_client
 from app.services.publisher import (
     PublisherClient,
@@ -313,7 +313,7 @@ def register(app: AsyncApp) -> None:
         # The LLM call runs with no DB transaction open.
         try:
             result = await generate_post_drafts(
-                transcript, voice, client=anthropic_client, settings=settings
+                transcript, seed_voices(voice), client=anthropic_client, settings=settings
             )
         except Exception:
             logger.exception("regenerate_failed", batch_id=str(b))

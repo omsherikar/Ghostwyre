@@ -29,6 +29,12 @@ class DraftSet(BaseModel):
     drafts: list[Draft]
 
 
+class DraftText(BaseModel):
+    """One platform's generated post text (platform is known by the caller)."""
+
+    text: str
+
+
 class VoiceCard(BaseModel):
     """A per-platform voice profile distilled from a user's real posts."""
 
