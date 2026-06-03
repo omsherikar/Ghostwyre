@@ -520,8 +520,17 @@ async def test_list_and_delete_voice_memory(session: AsyncSession) -> None:
     assert {r.instruction for r in listed} == {"a", "b"}
     assert all(isinstance(r.id, uuid.UUID) for r in listed)  # rows carry ids for /voice
 
-    assert await repo.delete_voice_memory(session, rows[0].id) is True
+    assert await repo.delete_voice_memory(session, rows[0].id, slack_user_id="Udel") is True
     remaining = await repo.list_voice_memory(session, "Udel")
     assert {r.instruction for r in remaining} == {"b"}
     # Deleting an unknown id is a no-op.
-    assert await repo.delete_voice_memory(session, uuid.uuid4()) is False
+    assert await repo.delete_voice_memory(session, uuid.uuid4(), slack_user_id="Udel") is False
+
+
+async def test_delete_voice_memory_rejects_other_user(session: AsyncSession) -> None:
+    # A rule id is owned: another user can't delete it (forged/replayed Forget click).
+    rows = await repo.add_voice_memory(
+        session, slack_user_id="Uowner", platform=DraftPlatform.x, instructions=["mine"]
+    )
+    assert await repo.delete_voice_memory(session, rows[0].id, slack_user_id="Uattacker") is False
+    assert {r.instruction for r in await repo.list_voice_memory(session, "Uowner")} == {"mine"}

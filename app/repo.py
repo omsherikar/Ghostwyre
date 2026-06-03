@@ -398,22 +398,32 @@ async def get_voice_memory(
     return out
 
 
-async def list_voice_memory(session: AsyncSession, slack_user_id: str) -> list[VoiceMemory]:
-    """All of the user's learned rules (rows with ids), platform then newest first —
-    for the /voice view."""
+async def list_voice_memory(
+    session: AsyncSession, slack_user_id: str, *, limit: int = 40
+) -> list[VoiceMemory]:
+    """The user's learned rules (rows with ids), newest first, capped at *limit* — for
+    the /voice view. The cap keeps the rendered card under Slack's 50-block ceiling;
+    build_voice_blocks regroups by platform."""
     result = await session.execute(
         select(VoiceMemory)
         .where(VoiceMemory.slack_user_id == slack_user_id)
-        .order_by(VoiceMemory.platform, VoiceMemory.created_at.desc())
+        .order_by(VoiceMemory.created_at.desc())
+        .limit(limit)
     )
     return list(result.scalars().all())
 
 
-async def delete_voice_memory(session: AsyncSession, memory_id: uuid.UUID) -> bool:
-    """Delete one learned rule by id; True iff a row was removed."""
+async def delete_voice_memory(
+    session: AsyncSession, memory_id: uuid.UUID, *, slack_user_id: str
+) -> bool:
+    """Delete one of *slack_user_id*'s learned rules by id; True iff a row was removed.
+
+    The owner filter is mandatory: a forged/replayed Forget click carrying another
+    user's rule id must not delete it.
+    """
     result = await session.execute(
         delete(VoiceMemory)
-        .where(VoiceMemory.id == memory_id)
+        .where(VoiceMemory.id == memory_id, VoiceMemory.slack_user_id == slack_user_id)
         .execution_options(synchronize_session="fetch")
     )
     await session.flush()

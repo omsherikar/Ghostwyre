@@ -77,14 +77,9 @@ def register(app: AsyncApp) -> None:
         if text is None:
             return
 
-        meta = json.dumps(
-            {
-                "b": str(b),
-                "d": str(d),
-                "channel": body.get("channel", {}).get("id", ""),
-                "ts": body.get("message", {}).get("ts", ""),
-            }
-        )
+        # Carry only ids — the card's (channel, ts) are read from the batch record on
+        # submit (the authoritative source, like the other handlers).
+        meta = json.dumps({"b": str(b), "d": str(d)})
         await client.views_open(
             trigger_id=body["trigger_id"],
             view=_edit_view(draft_text=text, private_metadata=meta),
@@ -99,8 +94,6 @@ def register(app: AsyncApp) -> None:
             meta = json.loads(view.get("private_metadata") or "{}")
             d = uuid.UUID(meta["d"])
             b = uuid.UUID(meta["b"])
-            channel = meta["channel"]
-            ts = meta["ts"]
         except (json.JSONDecodeError, KeyError, ValueError, TypeError):
             return
         edited = (
@@ -108,7 +101,7 @@ def register(app: AsyncApp) -> None:
             or ""
         ).strip()
 
-        # Load the original (DB still holds it) + guard. Capture primitives.
+        # Load the original (DB still holds it) + cheap pre-guard. Capture primitives.
         async with SessionLocal() as session:
             draft = await repo.get_draft(session, d)
             if draft is None:
@@ -121,18 +114,25 @@ def register(app: AsyncApp) -> None:
         if status != BatchStatus.pending or not edited or edited == original:
             return
 
-        # Save the edit + re-render the card so Approve now publishes the edited text.
+        # Save the edit + re-render, re-checking `pending` INSIDE the txn so a concurrent
+        # Approve/Cancel landing between the read above and this write can't be clobbered
+        # (and we never mutate an already-published draft or learn from it).
         async with SessionLocal() as session:
             async with session.begin():
+                batch = await repo.get_batch(session, b)
+                if batch is None or batch.status != BatchStatus.pending:
+                    return  # resolved meanwhile — leave the terminal card alone
                 await repo.set_draft_text(session, d, edited)
             batch = await repo.get_batch(session, b)
-        if batch is not None:
-            await client.chat_update(
-                channel=channel,
-                ts=ts,
-                blocks=build_draft_blocks(batch, x_char_limit=settings.x_char_limit),
-                text=fallback_text(batch),
-            )
+        if batch is None:
+            return
+        # Use the card's authoritative coordinates from the batch record.
+        await client.chat_update(
+            channel=batch.slack_channel_id,
+            ts=batch.slack_message_ts,
+            blocks=build_draft_blocks(batch, x_char_limit=settings.x_char_limit),
+            text=fallback_text(batch),
+        )
 
         # Learn from the edit (slow LLM call, after the card already updated).
         try:
@@ -177,7 +177,7 @@ def register(app: AsyncApp) -> None:
         user_id = body["user"]["id"]
         async with SessionLocal() as session:
             async with session.begin():
-                await repo.delete_voice_memory(session, m)
+                await repo.delete_voice_memory(session, m, slack_user_id=user_id)
             rows = await repo.list_voice_memory(session, user_id)
             blocks = build_voice_blocks(rows)
             text = voice_fallback(len(rows))

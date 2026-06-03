@@ -130,9 +130,9 @@ async def test_edit_button_opens_prefilled_modal(monkeypatch: pytest.MonkeyPatch
     assert view["callback_id"] == EDIT_CALLBACK_ID
     # Pre-filled with the current draft text.
     assert view["blocks"][0]["element"]["initial_value"] == "DRAFT BODY TEXT"
-    # private_metadata carries ids + where to update the card.
+    # private_metadata carries only ids; the card's (channel, ts) come from the batch.
     meta = json.loads(view["private_metadata"])
-    assert meta == {"b": str(b), "d": str(d), "channel": CHANNEL, "ts": TS}
+    assert meta == {"b": str(b), "d": str(d)}
 
 
 @pytest.mark.asyncio
