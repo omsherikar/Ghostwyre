@@ -90,6 +90,25 @@ flowchart TD
 - **Publish** (`app/services/publisher.py`, `x_publisher.py`) is a `PublisherClient`
   Protocol: `DryRunPublisher` by default, `XPublisher` (tweepy) when `PUBLISHER=x`.
 
+## Who can use it / access
+
+Ghostwyre is a **self-hosted Slack app for a single workspace** — there's no hosted
+SaaS or "Add to Slack" button. To use it you run your own instance: clone the repo,
+create your own Slack app, and point it at an LLM key + a Postgres database (the
+**Quick start** below). It runs in **Socket Mode**, so it connects *out* to Slack —
+**no public server or URL is needed** (a laptop, a small VPS, Fly.io/Railway, even a
+Raspberry Pi works); the only requirement is keeping the process running.
+
+- **Free to try:** use Groq's free tier (`LLM_PROVIDER=groq`) + the default dry-run
+  publisher (`PUBLISHER=dry`, posts a fake link) + Dockerized Postgres — **$0**, no X
+  account needed. Real tweets need the paid X Basic tier.
+- **Let others try it:** invite them into the workspace where your instance runs —
+  voice and learned memory are per Slack user, so each person gets their own `/setup`,
+  drafts, and `/voice`, all served by your one process.
+- **Not built (it's a portfolio/self-host tool):** always-on managed hosting, a
+  multi-workspace OAuth "install" flow, and data retention/encryption — see
+  [Status & limitations](#status--limitations).
+
 ## Quick start (dev)
 ```bash
 make install        # uv sync
