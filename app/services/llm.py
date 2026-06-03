@@ -30,7 +30,14 @@ from app.config import Settings, get_settings
 from app.logging import get_logger
 from app.platforms import PLATFORMS
 from app.services.json_parse import JSONParseError, loads_lenient
-from app.services.schemas import Draft, DraftText, PostworthyItem, PostworthyResult, VoiceCard
+from app.services.schemas import (
+    Draft,
+    DraftText,
+    PostworthyItem,
+    PostworthyResult,
+    RankedIdeas,
+    VoiceCard,
+)
 
 logger = get_logger(__name__)
 
@@ -208,6 +215,95 @@ async def extract_postworthy(
         max_tokens=settings.extract_max_tokens,
     )
     logger.info("postworthy_extract_complete", item_count=len(result.items))
+    return result
+
+
+RANK_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "ideas": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "summary": {"type": "string"},
+                    "angle": {"type": "string"},
+                    "score": {"type": "integer"},
+                    "evidence": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["summary", "angle", "score", "evidence"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["ideas"],
+    "additionalProperties": False,
+}
+
+RANK_SYSTEM = """\
+You are given candidate post ideas already extracted from a team-chat transcript,
+plus the transcript itself. Score and rank them so the user can pick the one idea
+most worth posting publicly.
+
+For EACH idea, score it 0-100 on these criteria together:
+- novelty — is the insight fresh, or an obvious truism?
+- specificity — is it concrete (real numbers, the actual bug/decision), or vague?
+- audience value — would a developer/founder reader actually learn or feel something?
+- "would you proudly share this" — is it worth attaching your name to publicly?
+
+Rules:
+- MERGE near-duplicate ideas into a single, stronger idea (do not list the same
+  insight twice with different wording).
+- For each idea, write `angle`: one line on the sharpest take to post about it.
+- For each idea, include `evidence`: 1-3 SHORT VERBATIM quotes copied from the
+  transcript that prompted it (the real lines — do not paraphrase or invent).
+- Order the `ideas` array by `score`, highest first.
+- Never include anything confidential (secrets/credentials, customer names,
+  internal financials, unreleased plans) in any field."""
+
+
+def _render_rank_request(items: list[PostworthyItem], transcript: str) -> str:
+    """Build the ranking prompt: the candidate ideas + the source transcript."""
+    candidates = "\n".join(f"- {item.summary} (why: {item.reason})" for item in items)
+    return (
+        "Candidate ideas extracted from the conversation:\n"
+        f"{candidates}\n\n"
+        "The conversation transcript (score against this, and quote from it as evidence):\n"
+        f"{transcript}\n\n"
+        "Score, dedupe, and rank these ideas."
+    )
+
+
+async def rank_ideas(
+    items: list[PostworthyItem],
+    transcript: str,
+    *,
+    client: LLMClient,
+    settings: Settings,
+) -> RankedIdeas:
+    """Score, dedupe, and rank the candidate *items* against the *transcript*.
+
+    Each returned idea carries a 0-100 score, a suggested angle, and verbatim
+    transcript quotes as evidence; the list is ordered highest-score first. Reuses
+    the structured-output + retry-once machinery. Never logs idea or transcript text.
+    """
+    system: list[TextBlockParam] = [
+        {
+            "type": "text",
+            "text": RANK_SYSTEM,
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+    result = await _structured_call(
+        client=client,
+        settings=settings,
+        system=system,
+        user=_render_rank_request(items, transcript),
+        schema=RANK_SCHEMA,
+        model_cls=RankedIdeas,
+        max_tokens=settings.rank_max_tokens,
+    )
+    logger.info("idea_rank_complete", item_count=len(items), ranked_count=len(result.ideas))
     return result
 
 

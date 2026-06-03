@@ -20,6 +20,20 @@ class PostworthyResult(BaseModel):
     items: list[PostworthyItem]
 
 
+class RankedIdea(BaseModel):
+    """A scored candidate idea: the idea, the suggested angle, a 0-100 score, and
+    1-3 verbatim transcript quotes as evidence for why it surfaced."""
+
+    summary: str
+    angle: str
+    score: int
+    evidence: list[str]
+
+
+class RankedIdeas(BaseModel):
+    ideas: list[RankedIdea]
+
+
 class Draft(BaseModel):
     platform: Literal["x", "linkedin"] = "x"
     text: str
