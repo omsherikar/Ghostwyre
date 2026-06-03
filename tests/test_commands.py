@@ -224,6 +224,7 @@ def _wire(
     rank_raises: bool = False,
     generate_raises: bool = False,
     profiles: dict[str, Any] | None = None,
+    memory: dict[str, list[str]] | None = None,
 ) -> tuple[Recorder, FakeClient]:
     """Monkeypatch the DB + content collaborators; return (recorder, client)."""
     rec = Recorder()
@@ -241,6 +242,13 @@ def _wire(
         return profiles or {}
 
     monkeypatch.setattr(repo, "get_voice_profiles", fake_get_voice_profiles)
+
+    async def fake_get_voice_memory(
+        session: Any, slack_user_id: str, *, limit_per_platform: int
+    ) -> dict[str, list[str]]:
+        return memory or {}
+
+    monkeypatch.setattr(repo, "get_voice_memory", fake_get_voice_memory)
 
     async def fake_rank(transcript: str, *, client: Any, settings: Any) -> RankResult:
         rec.calls.append("rank")
@@ -288,6 +296,7 @@ async def _run(
     generate_raises: bool = False,
     client: FakeClient | None = None,
     profiles: dict[str, Any] | None = None,
+    memory: dict[str, list[str]] | None = None,
 ) -> tuple[Recorder, FakeClient, RespondRecorder]:
     rec, default_client = _wire(
         monkeypatch,
@@ -297,6 +306,7 @@ async def _run(
         rank_raises=rank_raises,
         generate_raises=generate_raises,
         profiles=profiles,
+        memory=memory,
     )
     cl = client if client is not None else default_client
     cl.call_log = rec.calls  # so chat_postMessage ordering is in the shared log
@@ -394,6 +404,18 @@ async def test_single_idea_uses_invokers_stored_voice(monkeypatch: pytest.Monkey
     assert rec.voices is not None
     assert rec.voices["x"].voice_card == "USER X VOICE"
     assert rec.voices["x"].sample_posts == ["p1", "p2"]
+
+
+@pytest.mark.asyncio
+async def test_single_idea_feeds_learned_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Learned rules for the invoker reach generation as that platform's VoiceContext.memory.
+    content = ContentResult(postworthy=True, drafts=[Draft(text="d0")])
+    rec, client, respond = await _run(
+        monkeypatch, ideas=[_idea()], content=content, memory={"x": ["No emojis.", "Be terse."]}
+    )
+    assert rec.voices is not None
+    assert rec.voices["x"].memory == ["No emojis.", "Be terse."]
+    assert rec.voices["linkedin"].memory == []  # platform with no learned rules
 
 
 @pytest.mark.asyncio

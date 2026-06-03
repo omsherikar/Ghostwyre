@@ -328,7 +328,13 @@ def register(app: AsyncApp) -> None:
         async with SessionLocal() as session:
             batch = await repo.get_batch(session, b)
             voices = (
-                build_voices(await repo.get_voice_profiles(session, batch.slack_user_id), voice)
+                build_voices(
+                    await repo.get_voice_profiles(session, batch.slack_user_id),
+                    await repo.get_voice_memory(
+                        session, batch.slack_user_id, limit_per_platform=settings.voice_memory_limit
+                    ),
+                    voice,
+                )
                 if batch is not None
                 else {}
             )
@@ -434,7 +440,13 @@ def register(app: AsyncApp) -> None:
         async with SessionLocal() as session:
             batch = await repo.get_batch(session, b)
             voices = (
-                build_voices(await repo.get_voice_profiles(session, batch.slack_user_id), voice)
+                build_voices(
+                    await repo.get_voice_profiles(session, batch.slack_user_id),
+                    await repo.get_voice_memory(
+                        session, batch.slack_user_id, limit_per_platform=settings.voice_memory_limit
+                    ),
+                    voice,
+                )
                 if batch is not None
                 else {}
             )

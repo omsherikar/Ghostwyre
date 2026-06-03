@@ -120,3 +120,40 @@ async def test_generate_platform_draft_prompt_has_voice_strategy_exemplars_groun
     assert transcript in user_msg  # grounded in the conversation
     assert "EXEMPLAR-POST-ALPHA" in user_msg  # the user's real post as an exemplar
     assert "Known for shipping." in user_msg  # positioning
+
+
+@pytest.mark.asyncio
+async def test_generate_platform_draft_injects_learned_memory() -> None:
+    client = FakeClient([json.dumps({"text": "A post."})])
+    await generate_platform_draft(
+        _items(),
+        "x",
+        voice_card="Voice.",
+        positioning="",
+        exemplars=[],
+        transcript="alice: shipped X",
+        client=client,  # type: ignore[arg-type]
+        settings=_settings(),
+        memory=["Don't open with 'I'.", "No emojis."],
+    )
+    system_texts = [b["text"] for b in client.messages.calls[0]["system"]]
+    blob = "\n".join(system_texts)
+    assert "Don't open with 'I'." in blob  # learned rules reach the (cached) system prompt
+    assert "No emojis." in blob
+
+
+@pytest.mark.asyncio
+async def test_generate_platform_draft_no_memory_block_when_empty() -> None:
+    client = FakeClient([json.dumps({"text": "A post."})])
+    await generate_platform_draft(
+        _items(),
+        "x",
+        voice_card="Voice.",
+        positioning="",
+        exemplars=[],
+        transcript="alice: shipped X",
+        client=client,  # type: ignore[arg-type]
+        settings=_settings(),
+    )
+    system_texts = [b["text"] for b in client.messages.calls[0]["system"]]
+    assert not any("learned from this user's past edits" in t for t in system_texts)

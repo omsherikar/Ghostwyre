@@ -371,13 +371,15 @@ async def generate_platform_draft(
     transcript: str,
     client: LLMClient,
     settings: Settings,
+    memory: list[str] | None = None,
 ) -> Draft:
     """Draft ONE post for *platform*, in the user's voice, grounded in the transcript.
 
     System blocks: the draft rules + the platform's strategy + the user's voice
-    card (cached). The user's positioning, the insights, the transcript, and the
-    exemplar posts go in the user message. Retries the call+parse once. Never logs
-    the transcript, exemplars, or draft text.
+    card (cached) + any learned `memory` rules from past edits (cached). The user's
+    positioning, the insights, the transcript, and the exemplar posts go in the user
+    message. Retries the call+parse once. Never logs the transcript, exemplars,
+    memory, or draft text.
     """
     system: list[TextBlockParam] = [
         {"type": "text", "text": DRAFT_SYSTEM},
@@ -388,6 +390,18 @@ async def generate_platform_draft(
             "cache_control": {"type": "ephemeral"},
         },
     ]
+    if memory:
+        rules = "\n".join(f"- {rule}" for rule in memory)
+        system.append(
+            {
+                "type": "text",
+                "text": (
+                    "Sticky preferences learned from this user's past edits — "
+                    f"follow these exactly:\n{rules}"
+                ),
+                "cache_control": {"type": "ephemeral"},
+            }
+        )
     result = await _structured_call(
         client=client,
         settings=settings,
