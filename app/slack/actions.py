@@ -33,7 +33,7 @@ from app.db import SessionLocal
 from app.db.models import ApprovalAction, BatchStatus, DraftBatch, DraftPlatform, DraftStatus
 from app.logging import get_logger
 from app.platforms import PLATFORMS
-from app.services.content import build_voices, generate_post_drafts, load_voice
+from app.services.content import build_voices, generate_idea_drafts, load_voice
 from app.services.llm import build_client
 from app.services.publisher import (
     PublisherClient,
@@ -41,7 +41,8 @@ from app.services.publisher import (
     PublishUnknownError,
     get_publisher,
 )
-from app.slack.blocks import build_draft_blocks, fallback_text
+from app.services.schemas import RankedIdea
+from app.slack.blocks import build_draft_blocks, build_idea_blocks, fallback_text
 
 logger = get_logger(__name__)
 
@@ -63,13 +64,36 @@ def parse_action_value(value: str | None) -> tuple[str, str | None]:
 
 
 def _recover_batch_id(action: dict[str, Any]) -> str | None:
-    """Best-effort batch id from the block_id backstop `draft_actions:<batch>:<slot>`."""
+    """Best-effort batch id from a block_id backstop.
+
+    Both card types embed it: `draft_actions:<batch>:<slot>` (approval card) and
+    `idea_actions:<batch>:<i|cancel>` (ranked-idea card).
+    """
     block_id = action.get("block_id")
-    if isinstance(block_id, str) and block_id.startswith("draft_actions:"):
+    if isinstance(block_id, str) and block_id.startswith(("draft_actions:", "idea_actions:")):
         parts = block_id.split(":")
         if len(parts) >= 2 and parts[1]:
             return parts[1]
     return None
+
+
+def parse_pick_value(value: str | None) -> tuple[str | None, int | None]:
+    """Decode a pick button value to (batch_id, idea_index); (None, None) if unreadable."""
+    try:
+        data = json.loads(value or "{}")
+        return data["b"], int(data["i"])
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+        return None, None
+
+
+def _idea_from_dict(d: dict[str, Any]) -> RankedIdea:
+    """Rebuild a RankedIdea from a persisted candidate_ideas entry."""
+    return RankedIdea(
+        summary=d.get("summary", ""),
+        angle=d.get("angle", ""),
+        score=int(d.get("score", 0)),
+        evidence=list(d.get("evidence", []) or []),
+    )
 
 
 def _notice_blocks(mrkdwn: str) -> list[dict[str, Any]]:
@@ -91,6 +115,14 @@ def _regenerating_blocks(batch: DraftBatch) -> list[dict[str, Any]]:
             "type": "context",
             "elements": [{"type": "mrkdwn", "text": f"Re-drafting {n} posts 🔄"}],
         },
+    ]
+
+
+def _drafting_blocks() -> list[dict[str, Any]]:
+    """Interim card shown while the picked idea is being drafted (no buttons)."""
+    return [
+        {"type": "header", "text": {"type": "plain_text", "text": "Drafting…"}},
+        {"type": "context", "elements": [{"type": "mrkdwn", "text": "Writing your post 🖊️"}]},
     ]
 
 
@@ -291,9 +323,8 @@ def register(app: AsyncApp) -> None:
             )
             return
 
-        # Read + guard (no writes). Re-render of a terminal batch happens outside.
-        # Build the original invoker's per-platform voices in the same session (their
-        # stored profile where it exists, else the voice.md seed).
+        # Read + guard (no writes). Capture the chosen idea + transcript and build the
+        # original invoker's voices in the same session. Terminal re-render happens outside.
         async with SessionLocal() as session:
             batch = await repo.get_batch(session, b)
             voices = (
@@ -310,7 +341,20 @@ def register(app: AsyncApp) -> None:
                     fallback_text(batch),
                 )
             return
+
+        # Regenerate re-drafts the SAME idea the batch was drafted from.
+        ideas = batch.candidate_ideas
+        chosen = batch.chosen_idea_index
+        if chosen is None or chosen < 0 or chosen >= len(ideas):
+            await _update_card(
+                client,
+                batch,
+                build_draft_blocks(batch, x_char_limit=settings.x_char_limit),
+                fallback_text(batch),
+            )
+            return
         transcript = batch.transcript  # CONFIDENTIAL — never logged.
+        idea = _idea_from_dict(ideas[chosen])
 
         # Interim feedback (no transaction held) so the user can't double-fire.
         await _update_card(
@@ -319,8 +363,8 @@ def register(app: AsyncApp) -> None:
 
         # The LLM call runs with no DB transaction open.
         try:
-            result = await generate_post_drafts(
-                transcript, voices, client=anthropic_client, settings=settings
+            content = await generate_idea_drafts(
+                idea, transcript, voices, client=anthropic_client, settings=settings
             )
         except Exception:
             logger.exception("regenerate_failed", batch_id=str(b))
@@ -332,21 +376,6 @@ def register(app: AsyncApp) -> None:
                 await _update_card(client, batch, blocks, "Ghostwyre: regenerate failed.")
             return
 
-        if not result.postworthy:
-            async with SessionLocal() as session:
-                batch = await repo.get_batch(session, b)
-            if batch is not None:
-                await _update_card(
-                    client,
-                    batch,
-                    _notice_blocks(
-                        "Nothing here looks postworthy on a re-read — "
-                        "the original drafts are kept. Run `/draft-post` after more discussion."
-                    ),
-                    "Ghostwyre: nothing postworthy.",
-                )
-            return
-
         # Swap the drafts + record the event in one short transaction, THEN render.
         async with SessionLocal() as session:
             async with session.begin():
@@ -355,7 +384,7 @@ def register(app: AsyncApp) -> None:
                     b,
                     [
                         repo.DraftSpec(text=d.text, platform=DraftPlatform(d.platform))
-                        for d in result.drafts
+                        for d in content.drafts
                     ],
                 )
                 await repo.record_event(
@@ -374,7 +403,114 @@ def register(app: AsyncApp) -> None:
                 build_draft_blocks(batch, x_char_limit=settings.x_char_limit),
                 fallback_text(batch),
             )
-        logger.info("regenerate_done", batch_id=str(b), draft_count=len(result.drafts))
+        logger.info("regenerate_done", batch_id=str(b), draft_count=len(content.drafts))
+
+    @app.action("pick_idea")
+    async def pick_idea(
+        ack: Any, body: dict[str, Any], action: dict[str, Any], client: Any
+    ) -> None:
+        await ack()  # FIRST — Slack times out at 3s.
+
+        batch_id_s, idea_index = parse_pick_value(action.get("value"))
+        if batch_id_s is None:
+            batch_id_s = _recover_batch_id(action)
+        try:
+            b = uuid.UUID(batch_id_s) if batch_id_s else None
+        except (ValueError, TypeError):
+            b = None
+
+        if b is None or idea_index is None:
+            await client.chat_update(
+                channel=body.get("channel", {}).get("id", ""),
+                ts=body.get("message", {}).get("ts", ""),
+                blocks=_notice_blocks(
+                    "Sorry — I couldn't read that button. Run `/draft-post` again."
+                ),
+                text="Ghostwyre: couldn't read that button.",
+            )
+            return
+
+        # Read + guard (no writes). Build the invoker's voices in the same session.
+        async with SessionLocal() as session:
+            batch = await repo.get_batch(session, b)
+            voices = (
+                build_voices(await repo.get_voice_profiles(session, batch.slack_user_id), voice)
+                if batch is not None
+                else {}
+            )
+        if batch is None:
+            return
+        # Idempotent: only a still-`selecting` batch drafts. A second click (already
+        # drafted/cancelled) just re-renders the current card.
+        if batch.status != BatchStatus.selecting:
+            await _update_card(
+                client,
+                batch,
+                build_draft_blocks(batch, x_char_limit=settings.x_char_limit),
+                fallback_text(batch),
+            )
+            return
+
+        ideas = batch.candidate_ideas
+        if idea_index < 0 or idea_index >= len(ideas):
+            await _update_card(
+                client,
+                batch,
+                _notice_blocks("Sorry — that idea is gone. Run `/draft-post` again."),
+                "Ghostwyre: idea not found.",
+            )
+            return
+
+        transcript = batch.transcript  # CONFIDENTIAL — never logged.
+        idea = _idea_from_dict(ideas[idea_index])
+
+        # Interim feedback (no transaction held) so the user can't double-fire.
+        await _update_card(client, batch, _drafting_blocks(), "Ghostwyre: drafting your post…")
+
+        try:
+            content = await generate_idea_drafts(
+                idea, transcript, voices, client=anthropic_client, settings=settings
+            )
+        except Exception:
+            logger.exception("pick_idea_failed", batch_id=str(b))
+            async with SessionLocal() as session:
+                batch = await repo.get_batch(session, b)
+            if batch is not None:
+                blocks = build_idea_blocks(batch)
+                blocks.append(_context_line("⚠️ Couldn't draft that idea — pick one again."))
+                await _update_card(client, batch, blocks, "Ghostwyre: drafting failed.")
+            return
+
+        # Persist the chosen idea + its drafts, flip selecting -> pending, audit, render.
+        async with SessionLocal() as session:
+            async with session.begin():
+                await repo.set_chosen_idea(session, b, idea_index)
+                await repo.replace_drafts(
+                    session,
+                    b,
+                    [
+                        repo.DraftSpec(text=d.text, platform=DraftPlatform(d.platform))
+                        for d in content.drafts
+                    ],
+                )
+                await repo.set_batch_status(session, b, BatchStatus.pending)
+                await repo.record_event(
+                    session,
+                    batch_id=b,
+                    draft_id=None,
+                    action=ApprovalAction.pick,
+                    slack_user_id=body["user"]["id"],
+                )
+            batch = await repo.get_batch(session, b)
+
+        if batch is not None:
+            await _update_card(
+                client,
+                batch,
+                build_draft_blocks(batch, x_char_limit=settings.x_char_limit),
+                fallback_text(batch),
+            )
+        logger.info("pick_idea_drafted", batch_id=str(b), draft_count=len(content.drafts))
 
     @app.action("cancel_batch")
     async def cancel_batch(

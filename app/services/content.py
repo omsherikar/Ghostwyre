@@ -80,46 +80,6 @@ def select_exemplars(sample_posts: list[str], items: list[PostworthyItem], n: in
     return ranked[:n]
 
 
-async def generate_post_drafts(
-    transcript: str,
-    voices: dict[str, VoiceContext],
-    *,
-    client: LLMClient,
-    settings: Settings,
-) -> ContentResult:
-    """Extract postworthy items, then draft one post per platform in *voices*.
-
-    If extraction yields no items, short-circuit with an empty, not-postworthy
-    result and make no drafting calls. Otherwise generate one draft per platform,
-    each with that platform's voice card + exemplars + strategy. Never logs
-    transcript, item, exemplar, or draft text.
-    """
-    extracted = await extract_postworthy(transcript, client=client, settings=settings)
-    if not extracted.items:
-        logger.info("content_nothing_postworthy", item_count=0)
-        return ContentResult(postworthy=False, drafts=[])
-
-    drafts: list[Draft] = []
-    for platform, ctx in voices.items():
-        exemplars = select_exemplars(
-            ctx.sample_posts, extracted.items, settings.voice_exemplar_count
-        )
-        draft = await generate_platform_draft(
-            extracted.items,
-            platform,
-            voice_card=ctx.voice_card,
-            positioning=ctx.positioning,
-            exemplars=exemplars,
-            transcript=transcript,
-            client=client,
-            settings=settings,
-        )
-        drafts.append(draft)
-
-    logger.info("content_drafts_ready", item_count=len(extracted.items), draft_count=len(drafts))
-    return ContentResult(postworthy=True, drafts=drafts)
-
-
 async def rank_channel_ideas(
     transcript: str,
     *,
