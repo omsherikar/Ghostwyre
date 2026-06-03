@@ -57,6 +57,11 @@ class ApprovalAction(enum.StrEnum):
     cancel = "cancel"
 
 
+class DraftPlatform(enum.StrEnum):
+    x = "x"
+    linkedin = "linkedin"
+
+
 class DraftBatch(Base):
     __tablename__ = "draft_batch"
 
@@ -101,6 +106,12 @@ class Draft(Base):
     )
     slot_index: Mapped[int] = mapped_column(Integer, nullable=False)  # 0-based
     text: Mapped[str] = mapped_column(Text, nullable=False)
+    platform: Mapped[DraftPlatform] = mapped_column(
+        Enum(DraftPlatform, native_enum=False, values_callable=lambda e: [m.value for m in e]),
+        nullable=False,
+        default=DraftPlatform.x,
+        server_default=DraftPlatform.x.value,
+    )
     status: Mapped[DraftStatus] = mapped_column(
         Enum(DraftStatus, native_enum=False, values_callable=lambda e: [m.value for m in e]),
         nullable=False,

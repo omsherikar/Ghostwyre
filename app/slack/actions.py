@@ -30,8 +30,9 @@ from slack_bolt.async_app import AsyncApp
 from app import repo
 from app.config import get_settings
 from app.db import SessionLocal
-from app.db.models import ApprovalAction, BatchStatus, DraftBatch, DraftStatus
+from app.db.models import ApprovalAction, BatchStatus, DraftBatch, DraftPlatform, DraftStatus
 from app.logging import get_logger
+from app.platforms import PLATFORMS
 from app.services.content import generate_post_drafts, load_voice
 from app.services.llm import build_client
 from app.services.publisher import (
@@ -154,7 +155,10 @@ def register(app: AsyncApp) -> None:
                 if batch is None or batch.status != BatchStatus.pending:
                     if batch is not None:
                         await _update_card(
-                            client, batch, build_draft_blocks(batch), fallback_text(batch)
+                            client,
+                            batch,
+                            build_draft_blocks(batch, x_char_limit=settings.x_char_limit),
+                            fallback_text(batch),
                         )
                     return
 
@@ -168,6 +172,19 @@ def register(app: AsyncApp) -> None:
                     )
                     return
 
+                # Backstop for the UI gate: only a publishable platform (X) within
+                # the effective limit can be approved. LinkedIn / over-limit X are
+                # copy-only — re-render without claiming or publishing.
+                spec = PLATFORMS[str(draft.platform)]
+                if not spec.publishable or len(draft.text) > settings.x_char_limit:
+                    await _update_card(
+                        client,
+                        batch,
+                        build_draft_blocks(batch, x_char_limit=settings.x_char_limit),
+                        fallback_text(batch),
+                    )
+                    return
+
                 draft_text = draft.text
                 claimed = await repo.claim_for_publish(session, b)
 
@@ -176,7 +193,12 @@ def register(app: AsyncApp) -> None:
             async with SessionLocal() as session:
                 batch = await repo.get_batch(session, b)
             if batch is not None:
-                await _update_card(client, batch, build_draft_blocks(batch), fallback_text(batch))
+                await _update_card(
+                    client,
+                    batch,
+                    build_draft_blocks(batch, x_char_limit=settings.x_char_limit),
+                    fallback_text(batch),
+                )
             return
 
         # Publish OUTSIDE any transaction. The batch is already 'approved', so a
@@ -195,7 +217,7 @@ def register(app: AsyncApp) -> None:
                     await repo.set_draft_status(session, d, DraftStatus.pending)
                 batch = await repo.get_batch(session, b)
             if batch is not None:
-                blocks = build_draft_blocks(batch)
+                blocks = build_draft_blocks(batch, x_char_limit=settings.x_char_limit)
                 blocks.append(_context_line(f"⚠️ Couldn't publish: {exc}. Try Regenerate."))
                 await _update_card(client, batch, blocks, "Ghostwyre: couldn't publish.")
             logger.info("approve_publish_failed", batch_id=str(b))
@@ -216,7 +238,7 @@ def register(app: AsyncApp) -> None:
                     )
                 batch = await repo.get_batch(session, b)
             if batch is not None:
-                blocks = build_draft_blocks(batch)
+                blocks = build_draft_blocks(batch, x_char_limit=settings.x_char_limit)
                 blocks.append(_context_line(f"⚠️ Publish status unknown. {exc}"))
                 await _update_card(client, batch, blocks, "Ghostwyre: publish status unknown.")
             logger.warning("approve_publish_unknown", batch_id=str(b))
@@ -236,7 +258,7 @@ def register(app: AsyncApp) -> None:
                 )
             batch = await repo.get_batch(session, b)
         assert batch is not None
-        blocks = build_draft_blocks(batch)
+        blocks = build_draft_blocks(batch, x_char_limit=settings.x_char_limit)
         run_label = "dry-run" if result.dry_run else "live"
         blocks.append(_context_line(f"Published ({run_label}): {result.url}"))
         await _update_card(client, batch, blocks, fallback_text(batch))
@@ -274,7 +296,12 @@ def register(app: AsyncApp) -> None:
             batch = await repo.get_batch(session, b)
         if batch is None or batch.status != BatchStatus.pending:
             if batch is not None:
-                await _update_card(client, batch, build_draft_blocks(batch), fallback_text(batch))
+                await _update_card(
+                    client,
+                    batch,
+                    build_draft_blocks(batch, x_char_limit=settings.x_char_limit),
+                    fallback_text(batch),
+                )
             return
         transcript = batch.transcript  # CONFIDENTIAL — never logged.
 
@@ -293,7 +320,7 @@ def register(app: AsyncApp) -> None:
             async with SessionLocal() as session:
                 batch = await repo.get_batch(session, b)
             if batch is not None:
-                blocks = build_draft_blocks(batch)
+                blocks = build_draft_blocks(batch, x_char_limit=settings.x_char_limit)
                 blocks.append(_context_line("⚠️ Regenerate failed — original drafts kept."))
                 await _update_card(client, batch, blocks, "Ghostwyre: regenerate failed.")
             return
@@ -316,7 +343,14 @@ def register(app: AsyncApp) -> None:
         # Swap the drafts + record the event in one short transaction, THEN render.
         async with SessionLocal() as session:
             async with session.begin():
-                await repo.replace_drafts(session, b, [d.text for d in result.drafts])
+                await repo.replace_drafts(
+                    session,
+                    b,
+                    [
+                        repo.DraftSpec(text=d.text, platform=DraftPlatform(d.platform))
+                        for d in result.drafts
+                    ],
+                )
                 await repo.record_event(
                     session,
                     batch_id=b,
@@ -327,7 +361,12 @@ def register(app: AsyncApp) -> None:
             batch = await repo.get_batch(session, b)
 
         if batch is not None:
-            await _update_card(client, batch, build_draft_blocks(batch), fallback_text(batch))
+            await _update_card(
+                client,
+                batch,
+                build_draft_blocks(batch, x_char_limit=settings.x_char_limit),
+                fallback_text(batch),
+            )
         logger.info("regenerate_done", batch_id=str(b), draft_count=len(result.drafts))
 
     @app.action("cancel_batch")
@@ -376,5 +415,10 @@ def register(app: AsyncApp) -> None:
             batch = await repo.get_batch(session, b)
 
         if batch is not None:
-            await _update_card(client, batch, build_draft_blocks(batch), fallback_text(batch))
+            await _update_card(
+                client,
+                batch,
+                build_draft_blocks(batch, x_char_limit=settings.x_char_limit),
+                fallback_text(batch),
+            )
         logger.info("batch_cancelled", batch_id=str(b))

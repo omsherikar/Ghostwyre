@@ -54,7 +54,9 @@ async def generate_post_drafts(
         logger.info("content_nothing_postworthy", item_count=0)
         return ContentResult(postworthy=False, drafts=[])
 
-    draft_set = await generate_drafts(extracted.items, voice, client=client, settings=settings)
+    draft_set = await generate_drafts(
+        extracted.items, voice, transcript=transcript, client=client, settings=settings
+    )
     logger.info(
         "content_drafts_ready",
         item_count=len(extracted.items),

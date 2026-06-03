@@ -12,7 +12,15 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from app.db.models import ApprovalAction, ApprovalEvent, BatchStatus, Draft, DraftBatch, DraftStatus
+from app.db.models import (
+    ApprovalAction,
+    ApprovalEvent,
+    BatchStatus,
+    Draft,
+    DraftBatch,
+    DraftPlatform,
+    DraftStatus,
+)
 from app.slack.blocks import (
     build_draft_blocks,
     build_history_blocks,
@@ -21,8 +29,13 @@ from app.slack.blocks import (
 )
 
 
-def _draft(slot: int, text: str, status: DraftStatus = DraftStatus.pending) -> Draft:
-    return Draft(id=uuid.uuid4(), slot_index=slot, text=text, status=status)
+def _draft(
+    slot: int,
+    text: str,
+    status: DraftStatus = DraftStatus.pending,
+    platform: DraftPlatform = DraftPlatform.x,
+) -> Draft:
+    return Draft(id=uuid.uuid4(), slot_index=slot, text=text, status=status, platform=platform)
 
 
 def _batch(
@@ -98,32 +111,53 @@ def test_draft_text_appears_in_blocks() -> None:
     assert "this-is-draft-zero" in _rendered_text(blocks)
 
 
-def test_slot_label_is_one_based_and_ordered() -> None:
-    batch = _batch([_draft(0, "alpha"), _draft(1, "beta")])
-    blocks = build_draft_blocks(batch)
-    rendered = _rendered_text(blocks)
-    assert "*Draft 1*" in rendered
-    assert "*Draft 2*" in rendered
-    assert rendered.index("*Draft 1*") < rendered.index("*Draft 2*")
+def test_platform_labels_and_order() -> None:
+    batch = _batch(
+        [
+            _draft(0, "a developed post", platform=DraftPlatform.linkedin),
+            _draft(1, "a punchy take", platform=DraftPlatform.x),
+        ]
+    )
+    rendered = _rendered_text(build_draft_blocks(batch))
+    assert "*LinkedIn draft*" in rendered
+    assert "*X draft*" in rendered
+    assert rendered.index("*LinkedIn draft*") < rendered.index("*X draft*")
 
 
-def test_over_limit_draft_drops_approve_keeps_regen_and_cancel() -> None:
-    long_text = "x" * 281
-    batch = _batch([_draft(0, long_text)])
+def test_linkedin_draft_is_copy_only_no_approve() -> None:
+    batch = _batch([_draft(0, "a developed linkedin post", platform=DraftPlatform.linkedin)])
     blocks = build_draft_blocks(batch)
+    ids = _button_action_ids(_actions_blocks(blocks)[0])
+    assert "approve_draft" not in ids  # no LinkedIn publisher — copy-only
+    assert ids == ["regenerate_draft", "cancel_batch"]
+    assert "copy & paste into linkedin" in _rendered_text(blocks).lower()
+
+
+def test_over_limit_x_draft_drops_approve_keeps_regen_and_cancel() -> None:
+    batch = _batch([_draft(0, "x" * 281, platform=DraftPlatform.x)])
+    blocks = build_draft_blocks(batch, x_char_limit=280)
     actions = _actions_blocks(blocks)
     assert len(actions) == 1
     ids = _button_action_ids(actions[0])
     assert "approve_draft" not in ids
     assert ids == ["regenerate_draft", "cancel_batch"]
-    assert "too long to publish" in _rendered_text(blocks)
+    assert "too long to auto-publish" in _rendered_text(blocks).lower()
 
 
-def test_at_limit_draft_keeps_approve() -> None:
-    batch = _batch([_draft(0, "y" * 280)])
-    blocks = build_draft_blocks(batch)
+def test_at_limit_x_draft_keeps_approve() -> None:
+    batch = _batch([_draft(0, "y" * 280, platform=DraftPlatform.x)])
+    blocks = build_draft_blocks(batch, x_char_limit=280)
     ids = _button_action_ids(_actions_blocks(blocks)[0])
     assert "approve_draft" in ids
+
+
+def test_long_x_draft_publishable_when_limit_raised() -> None:
+    # With a raised X limit (Premium), a long X draft keeps its Approve button.
+    batch = _batch([_draft(0, "z" * 1000, platform=DraftPlatform.x)])
+    blocks = build_draft_blocks(batch, x_char_limit=25000)
+    ids = _button_action_ids(_actions_blocks(blocks)[0])
+    assert "approve_draft" in ids
+    assert "characters" in _rendered_text(blocks)
 
 
 def test_cancelled_batch_single_section_no_actions() -> None:
@@ -163,8 +197,8 @@ def test_regenerating_draft_renders_placeholder_no_buttons() -> None:
     assert "Regenerating" in rendered
     # The old text must not be shown for a regenerating slot.
     assert "old-text" not in rendered
-    # Slot label still shown.
-    assert "*Draft 1*" in rendered
+    # Platform label still shown (both default to X here).
+    assert "*X draft*" in rendered
     # Only the normal draft (slot 1) keeps an actions block.
     assert len(_actions_blocks(blocks)) == 1
 

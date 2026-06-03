@@ -63,6 +63,20 @@ async def _draft_unique_constraints() -> set[str]:
         await engine.dispose()
 
 
+async def _draft_columns() -> set[str]:
+    from app.config import get_settings
+
+    def _names(conn: Connection) -> set[str]:
+        return {c["name"] for c in inspect(conn).get_columns("draft")}
+
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        async with engine.connect() as conn:
+            return await conn.run_sync(_names)
+    finally:
+        await engine.dispose()
+
+
 def _run_alembic(*args: str) -> None:
     """Run alembic in a subprocess (env.py runs its own asyncio loop)."""
     subprocess.run(
@@ -102,12 +116,16 @@ async def test_migration_upgrade_creates_tables() -> None:
     uc_names = await _draft_unique_constraints()
     assert "uq_draft_batch_slot" in uc_names
 
+    # The draft_platform migration adds the per-draft platform column.
+    assert "platform" in await _draft_columns()
+
 
 @pytest.mark.slow
 async def test_migration_downgrade_drops_tables() -> None:
-    # Ensure we start at head so the single-step downgrade is deterministic.
+    # Downgrade the whole chain to base (robust to the number of migrations) and
+    # assert the schema is torn down.
     _run_alembic("upgrade", "head")
-    _run_alembic("downgrade", "-1")
+    _run_alembic("downgrade", "base")
 
     tables = await _table_names()
     assert not (EXPECTED_TABLES & tables), (

@@ -24,7 +24,7 @@ import pytest
 from slack_sdk.errors import SlackApiError
 
 from app import repo
-from app.db.models import BatchStatus, DraftStatus
+from app.db.models import BatchStatus, DraftPlatform, DraftStatus
 from app.services.content import ContentResult
 from app.services.schemas import Draft
 from app.slack import commands
@@ -62,6 +62,7 @@ class FakeDraftRow:
         self.slot_index = slot_index
         self.text = text
         self.status = DraftStatus.pending
+        self.platform = DraftPlatform.x
 
 
 class FakeBatch:
@@ -145,16 +146,16 @@ class Recorder:
         channel_id: str,
         user_id: str,
         transcript: str,
-        draft_texts: list[str],
+        drafts: list[Any],
     ) -> FakeBatch:
         self.calls.append("create_batch")
         self.create_kwargs = {
             "channel_id": channel_id,
             "user_id": user_id,
             "transcript": transcript,
-            "draft_texts": draft_texts,
+            "drafts": drafts,
         }
-        self.batch = FakeBatch(channel_id=channel_id, draft_texts=draft_texts)
+        self.batch = FakeBatch(channel_id=channel_id, draft_texts=[s.text for s in drafts])
         return self.batch
 
     async def set_batch_message_ts(
@@ -233,7 +234,7 @@ async def test_persists_batch_before_posting(monkeypatch: pytest.MonkeyPatch) ->
     assert rec.create_kwargs is not None
     assert rec.create_kwargs["channel_id"] == CHANNEL
     assert rec.create_kwargs["user_id"] == USER
-    assert rec.create_kwargs["draft_texts"] == ["d0", "d1"]
+    assert [s.text for s in rec.create_kwargs["drafts"]] == ["d0", "d1"]
     assert isinstance(rec.create_kwargs["transcript"], str)
     assert rec.create_kwargs["transcript"]  # non-empty
 

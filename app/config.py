@@ -39,6 +39,13 @@ class Settings(BaseSettings):
     groq_api_key: str | None = None
     groq_model: str = "llama-3.3-70b-versatile"
     max_drafts: int = 3
+    # Output-token budgets per step. Drafting is long-form (a developed LinkedIn
+    # post + a developed X post), so it needs more headroom than extraction.
+    extract_max_tokens: int = 1024
+    draft_max_tokens: int = 4096
+    # The X approve/publish char ceiling. Default allows long posts (X Premium's
+    # long-post max); set lower to restrict. Posting >280 needs X Premium.
+    x_char_limit: int = 25000
 
     # --- Database (Phase 0+) ---
     database_url: str = "postgresql+asyncpg://ghostwyre:ghostwyre@localhost:5432/ghostwyre"

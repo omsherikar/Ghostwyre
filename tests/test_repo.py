@@ -13,7 +13,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import repo
-from app.db.models import ApprovalAction, BatchStatus, DraftStatus
+from app.db.models import ApprovalAction, BatchStatus, DraftPlatform, DraftStatus
 
 # All DB-backed; share one session-scoped event loop so the async DB fixtures
 # (whose setup/teardown must run on the same loop as the test) stay consistent
@@ -25,13 +25,17 @@ USER = "U456"
 TRANSCRIPT = "confidential transcript text"
 
 
+def _specs(*texts: str, platform: DraftPlatform = DraftPlatform.x) -> list[repo.DraftSpec]:
+    return [repo.DraftSpec(text=t, platform=platform) for t in texts]
+
+
 async def test_create_batch_returns_populated_batch(session: AsyncSession) -> None:
     batch = await repo.create_batch(
         session,
         channel_id=CHANNEL,
         user_id=USER,
         transcript=TRANSCRIPT,
-        draft_texts=["first", "second"],
+        drafts=_specs("first", "second"),
     )
 
     assert isinstance(batch.id, uuid.UUID)
@@ -55,7 +59,7 @@ async def test_get_batch_loads_drafts_in_slot_order(session: AsyncSession) -> No
         channel_id=CHANNEL,
         user_id=USER,
         transcript=TRANSCRIPT,
-        draft_texts=["a", "b", "c"],
+        drafts=_specs("a", "b", "c"),
     )
 
     loaded = await repo.get_batch(session, created.id)
@@ -71,7 +75,7 @@ async def test_get_draft_loads_batch(session: AsyncSession) -> None:
         channel_id=CHANNEL,
         user_id=USER,
         transcript=TRANSCRIPT,
-        draft_texts=["only"],
+        drafts=_specs("only"),
     )
     draft_id = created.drafts[0].id
 
@@ -92,7 +96,7 @@ async def test_set_batch_message_ts_persists(session: AsyncSession) -> None:
         channel_id=CHANNEL,
         user_id=USER,
         transcript=TRANSCRIPT,
-        draft_texts=["x"],
+        drafts=_specs("x"),
     )
 
     await repo.set_batch_message_ts(session, created.id, "C999", "1700000000.000100")
@@ -109,11 +113,11 @@ async def test_replace_drafts_swaps_whole_set(session: AsyncSession) -> None:
         channel_id=CHANNEL,
         user_id=USER,
         transcript=TRANSCRIPT,
-        draft_texts=["old0", "old1", "old2"],
+        drafts=_specs("old0", "old1", "old2"),
     )
     old_ids = {d.id for d in created.drafts}
 
-    new_drafts = await repo.replace_drafts(session, created.id, ["new0", "new1"])
+    new_drafts = await repo.replace_drafts(session, created.id, _specs("new0", "new1"))
 
     assert [d.slot_index for d in new_drafts] == [0, 1]
     assert [d.text for d in new_drafts] == ["new0", "new1"]
@@ -133,7 +137,7 @@ async def test_set_draft_status_reflects_via_get(session: AsyncSession) -> None:
         channel_id=CHANNEL,
         user_id=USER,
         transcript=TRANSCRIPT,
-        draft_texts=["d"],
+        drafts=_specs("d"),
     )
     draft_id = created.drafts[0].id
 
@@ -155,7 +159,7 @@ async def test_set_batch_status_reflects_via_get(session: AsyncSession) -> None:
         channel_id=CHANNEL,
         user_id=USER,
         transcript=TRANSCRIPT,
-        draft_texts=["d"],
+        drafts=_specs("d"),
     )
 
     await repo.set_batch_status(session, created.id, BatchStatus.cancelled)
@@ -176,7 +180,7 @@ async def test_record_event_approve_with_url(session: AsyncSession) -> None:
         channel_id=CHANNEL,
         user_id=USER,
         transcript=TRANSCRIPT,
-        draft_texts=["d"],
+        drafts=_specs("d"),
     )
     draft_id = created.drafts[0].id
 
@@ -205,7 +209,7 @@ async def test_record_event_cancel_without_draft(session: AsyncSession) -> None:
         channel_id=CHANNEL,
         user_id=USER,
         transcript=TRANSCRIPT,
-        draft_texts=["d"],
+        drafts=_specs("d"),
     )
 
     event = await repo.record_event(
@@ -227,7 +231,7 @@ async def test_claim_for_publish_wins_once_then_loses(session: AsyncSession) -> 
         channel_id=CHANNEL,
         user_id=USER,
         transcript=TRANSCRIPT,
-        draft_texts=["d"],
+        drafts=_specs("d"),
     )
 
     first = await repo.claim_for_publish(session, created.id)
@@ -250,7 +254,7 @@ async def test_updated_at_advances_on_status_write(session: AsyncSession) -> Non
         channel_id=CHANNEL,
         user_id=USER,
         transcript=TRANSCRIPT,
-        draft_texts=["d"],
+        drafts=_specs("d"),
     )
     # Commit so the status write lands in a *separate* transaction: Postgres'
     # now() is frozen per-transaction, so an in-transaction onupdate would reuse
@@ -268,7 +272,7 @@ async def _publish(session: AsyncSession, text: str, url: str | None) -> None:
     """Helper: create a batch and record one approve event (committed so created_at
     advances — Postgres now() is frozen per transaction)."""
     batch = await repo.create_batch(
-        session, channel_id=CHANNEL, user_id=USER, transcript=TRANSCRIPT, draft_texts=[text]
+        session, channel_id=CHANNEL, user_id=USER, transcript=TRANSCRIPT, drafts=_specs(text)
     )
     await repo.record_event(
         session,
@@ -287,7 +291,7 @@ async def test_list_published_newest_first_and_filters(session: AsyncSession) ->
     # Noise that must be excluded: an approve with no url (ambiguous) and a cancel.
     await _publish(session, "ambiguous", None)
     cx = await repo.create_batch(
-        session, channel_id=CHANNEL, user_id=USER, transcript=TRANSCRIPT, draft_texts=["c"]
+        session, channel_id=CHANNEL, user_id=USER, transcript=TRANSCRIPT, drafts=_specs("c")
     )
     await repo.record_event(
         session, batch_id=cx.id, draft_id=None, action=ApprovalAction.cancel, slack_user_id=USER
@@ -314,7 +318,7 @@ async def test_list_published_respects_limit(session: AsyncSession) -> None:
 async def test_list_unconfirmed_approved(session: AsyncSession) -> None:
     # Ambiguous: approved + an approve event with no url.
     amb = await repo.create_batch(
-        session, channel_id=CHANNEL, user_id=USER, transcript=TRANSCRIPT, draft_texts=["amb"]
+        session, channel_id=CHANNEL, user_id=USER, transcript=TRANSCRIPT, drafts=_specs("amb")
     )
     await repo.set_batch_status(session, amb.id, BatchStatus.approved)
     await repo.record_event(
@@ -327,12 +331,12 @@ async def test_list_unconfirmed_approved(session: AsyncSession) -> None:
     )
     # Crashed: approved with no events at all.
     crash = await repo.create_batch(
-        session, channel_id=CHANNEL, user_id=USER, transcript=TRANSCRIPT, draft_texts=["crash"]
+        session, channel_id=CHANNEL, user_id=USER, transcript=TRANSCRIPT, drafts=_specs("crash")
     )
     await repo.set_batch_status(session, crash.id, BatchStatus.approved)
     # Confirmed: approved WITH a url event -> excluded.
     ok = await repo.create_batch(
-        session, channel_id=CHANNEL, user_id=USER, transcript=TRANSCRIPT, draft_texts=["ok"]
+        session, channel_id=CHANNEL, user_id=USER, transcript=TRANSCRIPT, drafts=_specs("ok")
     )
     await repo.set_batch_status(session, ok.id, BatchStatus.approved)
     await repo.record_event(
@@ -345,7 +349,7 @@ async def test_list_unconfirmed_approved(session: AsyncSession) -> None:
     )
     # Pending: excluded.
     pend = await repo.create_batch(
-        session, channel_id=CHANNEL, user_id=USER, transcript=TRANSCRIPT, draft_texts=["pend"]
+        session, channel_id=CHANNEL, user_id=USER, transcript=TRANSCRIPT, drafts=_specs("pend")
     )
     await session.commit()
 

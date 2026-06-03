@@ -16,6 +16,7 @@ from app.db.models import (
     BatchStatus,
     Draft,
     DraftBatch,
+    DraftPlatform,
     DraftStatus,
 )
 
@@ -80,6 +81,20 @@ def test_enum_values() -> None:
     assert BatchStatus.approved.value == "approved"
     assert {m.value for m in ApprovalAction} == {"approve", "regenerate", "cancel"}
     assert "regenerating" in {m.value for m in DraftStatus}
+
+
+def test_draft_platform_enum_and_column() -> None:
+    assert {m.value for m in DraftPlatform} == {"x", "linkedin"}
+    # New drafts default to X; the column is non-null and VARCHAR (native_enum=False).
+    assert Draft.__table__.c.platform.nullable is False
+    compiled = Draft.__table__.c.platform.type.compile(dialect=postgresql.dialect())
+    assert compiled.startswith("VARCHAR")
+
+
+def test_draft_defaults_to_x_platform() -> None:
+    from app.services.schemas import Draft as DraftSchema
+
+    assert DraftSchema(text="hi").platform == "x"
 
 
 def test_db_package_reexports_session_local() -> None:

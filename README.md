@@ -1,10 +1,11 @@
 # Ghostwyre
 
 A Slack-native AI agent. Run `/draft-post` in a channel and Ghostwyre reads the
-recent conversation, decides whether anything is actually worth posting, drafts
-2–3 options **in your voice**, and — only after you click **Approve** — publishes
-the one you picked to X. The human-in-the-loop approval gate is mandatory; nothing
-is ever auto-posted.
+recent conversation, decides whether anything is actually worth posting, and
+drafts a long **LinkedIn** post and a long **X** post **in your voice** — both
+developed and grounded in what was actually said. You can publish the X draft to
+X with one **Approve** click (LinkedIn is copy-paste). The human-in-the-loop
+approval gate is mandatory; nothing is ever auto-posted.
 
 It's a small, deliberately-narrow portfolio project that takes one workflow
 end-to-end with production-minded plumbing: async everywhere, a two-step LLM
@@ -43,11 +44,14 @@ flowchart TD
   transcript. The transcript is treated as confidential — never logged.
 - **Generate** (`app/services/content.py` → `llm.py`) runs two LLM steps: a
   *postworthy filter* that can short-circuit with "nothing to post", then drafting
-  in your voice. Both use structured JSON output + prompt caching on the system
-  prompt and `voice.md`.
+  **one long LinkedIn post and one long X post** for the strongest insight,
+  grounded in the actual transcript (not a lossy summary). Structured JSON output +
+  prompt caching on the system prompt and `voice.md`. Works on Claude or Groq.
 - **Approve** (`app/slack/{blocks,actions}.py`) persists the batch first, posts one
-  living Block Kit card, and resolves every button by id. Approve publishes,
-  Regenerate re-runs generation, Cancel dismisses — each idempotent.
+  living Block Kit card (each draft labelled by platform), and resolves every
+  button by id. Approve appears only for the **X** draft within `X_CHAR_LIMIT`;
+  LinkedIn (and over-limit X) is copy-paste. Regenerate re-runs generation, Cancel
+  dismisses — each idempotent.
 - **Publish** (`app/services/publisher.py`, `x_publisher.py`) is a `PublisherClient`
   Protocol: `DryRunPublisher` by default, `XPublisher` (tweepy) when `PUBLISHER=x`.
 
@@ -86,6 +90,12 @@ real:
 **Approve is the only publish path** — nothing is ever auto-posted, and the
 approval click publishes at most once. Reverting to dry-run is a one-setting
 change (`PUBLISHER=dry`).
+
+**Long X posts & `X_CHAR_LIMIT`:** drafts are long-form by design. The X draft is
+publishable via Approve only when it fits `X_CHAR_LIMIT` (default 25000). Posting
+more than 280 characters to X needs **X Premium**; without it, keep the X draft
+short or just copy-paste. LinkedIn has no API integration here — its draft is
+always copy-paste. If you raise `X_CHAR_LIMIT`, also raise `DRAFT_MAX_TOKENS`.
 
 ## Design decisions
 

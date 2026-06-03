@@ -8,6 +8,15 @@ into the LLM (and prompt-cached) on every `/draft-post`.
 > 5–10 of YOUR real posts** when you can; nothing teaches the model your voice like
 > your own writing. The tone rules below are good to keep either way.
 
+## Per-platform notes
+Each `/draft-post` produces one **LinkedIn** draft and one **X** draft from the
+same insight. Keep the voice below on both; adjust only the shape:
+- **LinkedIn** — developed and multi-paragraph. Open with a hook, build the point
+  with the concrete specifics from the conversation, close with a crisp takeaway.
+  Short paragraphs separated by blank lines read well. Professional, still *you*.
+- **X** — a developed long-form take (not a one-liner). Lead with the sharpest
+  point and build the argument; tight and substantive.
+
 ## Tone rules
 - Casual and direct. Write like you talk, not like a press release.
 - No corporate-speak, no buzzwords ("leverage", "synergy", "excited to announce",

@@ -13,6 +13,7 @@ never place it in a Slack button value.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from typing import Any, cast
 
 from sqlalchemy import CursorResult, delete, func, select, update
@@ -25,8 +26,18 @@ from app.db.models import (
     BatchStatus,
     Draft,
     DraftBatch,
+    DraftPlatform,
     DraftStatus,
 )
+
+
+@dataclass(frozen=True)
+class DraftSpec:
+    """A draft to persist: its text and target platform. Keeps the repo decoupled
+    from the LLM-layer `schemas.Draft`."""
+
+    text: str
+    platform: DraftPlatform
 
 
 async def create_batch(
@@ -35,9 +46,9 @@ async def create_batch(
     channel_id: str,
     user_id: str,
     transcript: str,
-    draft_texts: list[str],
+    drafts: list[DraftSpec],
 ) -> DraftBatch:
-    """Persist a pending batch plus one pending draft per text (0-based slots)."""
+    """Persist a pending batch plus one pending draft per spec (0-based slots)."""
     batch = DraftBatch(
         slack_channel_id=channel_id,
         slack_user_id=user_id,
@@ -45,8 +56,8 @@ async def create_batch(
         status=BatchStatus.pending,
     )
     batch.drafts = [
-        Draft(slot_index=i, text=text, status=DraftStatus.pending)
-        for i, text in enumerate(draft_texts)
+        Draft(slot_index=i, text=spec.text, platform=spec.platform, status=DraftStatus.pending)
+        for i, spec in enumerate(drafts)
     ]
     session.add(batch)
     await session.flush()
@@ -128,7 +139,7 @@ async def set_batch_message_ts(
 async def replace_drafts(
     session: AsyncSession,
     batch_id: uuid.UUID,
-    draft_texts: list[str],
+    drafts: list[DraftSpec],
 ) -> list[Draft]:
     """Replace the batch's whole draft set with fresh pending rows (Regenerate)."""
     # synchronize_session="fetch" evicts the deleted rows from the session's
@@ -139,16 +150,17 @@ async def replace_drafts(
         .where(Draft.batch_id == batch_id)
         .execution_options(synchronize_session="fetch")
     )
-    drafts = [
+    new_rows = [
         Draft(
             batch_id=batch_id,
             slot_index=i,
-            text=text,
+            text=spec.text,
+            platform=spec.platform,
             status=DraftStatus.pending,
         )
-        for i, text in enumerate(draft_texts)
+        for i, spec in enumerate(drafts)
     ]
-    session.add_all(drafts)
+    session.add_all(new_rows)
     await session.flush()
     # If the parent batch is already loaded, its `drafts` collection still holds
     # the old set; expire it so the next access (e.g. get_batch's selectinload)
