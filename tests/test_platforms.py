@@ -23,3 +23,8 @@ def test_labels_and_limits() -> None:
     assert PLATFORMS["linkedin"].label == "LinkedIn"
     # LinkedIn allows long posts; its display limit is well above a tweet.
     assert PLATFORMS["linkedin"].char_limit >= 1000
+
+
+def test_every_platform_has_strategy() -> None:
+    for spec in PLATFORMS.values():
+        assert spec.strategy.strip(), f"{spec.key} is missing drafting strategy"
