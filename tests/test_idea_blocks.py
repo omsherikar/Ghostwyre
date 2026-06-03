@@ -10,9 +10,10 @@ import json
 import uuid
 from typing import Any
 
-from app.db.models import BatchStatus, DraftBatch
+from app.db.models import BatchStatus, Draft, DraftBatch, DraftPlatform, DraftStatus
 from app.slack.blocks import (
     PICK_ACTION_ID,
+    REOPEN_ACTION_ID,
     build_draft_blocks,
     build_idea_blocks,
     fallback_text,
@@ -104,3 +105,34 @@ def test_build_draft_blocks_renders_idea_card_for_selecting() -> None:
 
 def test_fallback_text_for_selecting_is_idea_text() -> None:
     assert "ideas worth posting" in fallback_text(_batch(IDEAS))
+
+
+def _pending_batch(ideas: list[dict[str, Any]]) -> DraftBatch:
+    return DraftBatch(
+        id=uuid.uuid4(),
+        slack_channel_id="C12345",
+        slack_user_id="U999",
+        transcript="t",
+        status=BatchStatus.pending,
+        candidate_ideas=ideas,
+        drafts=[
+            Draft(
+                id=uuid.uuid4(),
+                slot_index=i,
+                text=t,
+                status=DraftStatus.pending,
+                platform=DraftPlatform.x,
+            )
+            for i, t in enumerate(("x draft", "li draft"))
+        ],
+    )
+
+
+def test_reopen_button_shown_when_multiple_ideas() -> None:
+    # Drafted from a >1-idea shortlist -> offer "Pick a different idea".
+    assert REOPEN_ACTION_ID in json.dumps(build_draft_blocks(_pending_batch(IDEAS)))
+
+
+def test_reopen_button_hidden_for_single_idea() -> None:
+    # A single-idea batch has nothing else to switch to — no reopen button.
+    assert REOPEN_ACTION_ID not in json.dumps(build_draft_blocks(_pending_batch(IDEAS[:1])))

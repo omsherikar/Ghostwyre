@@ -789,6 +789,66 @@ async def test_cancel_chat_update_failure_persists(
 
 
 # --------------------------------------------------------------------------- #
+# reopen_ideas ("Pick a different idea" — back to the shortlist, no re-scan).
+# --------------------------------------------------------------------------- #
+
+
+@_db_test
+@_db_loop
+async def test_reopen_ideas_returns_to_picker(
+    monkeypatch: pytest.MonkeyPatch,
+    test_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    # A pending (drafted) batch can return to the ranked-idea card without a re-scan:
+    # status -> selecting, claim cleared, the stored ideas re-rendered.
+    monkeypatch.setattr(actions, "SessionLocal", test_sessionmaker)
+    fake_app = FakeApp()
+    register(fake_app)  # type: ignore[arg-type]
+    callbacks = fake_app.callbacks
+
+    batch_id, _ = await _seed_drafted_batch(test_sessionmaker, draft_texts=["x post"])
+    value = json.dumps({"b": str(batch_id)})
+    client = FakeClient()
+
+    await _invoke(callbacks, "reopen_ideas", value=value, client=client)
+
+    async with test_sessionmaker() as session:
+        loaded = await repo.get_batch(session, batch_id)
+        assert loaded is not None
+        assert loaded.status is BatchStatus.selecting
+        assert loaded.chosen_idea_index is None  # claim released, ready to re-pick
+
+    # Re-rendered the idea picker (a "Draft this" button per idea), not the draft card.
+    assert "pick_idea" in json.dumps(client.updates[-1]["blocks"])
+
+
+@_db_test
+@_db_loop
+async def test_reopen_ideas_noop_after_publish(
+    monkeypatch: pytest.MonkeyPatch,
+    test_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    # Once published (approved), there's no going back — reopen must not re-arm.
+    monkeypatch.setattr(actions, "SessionLocal", test_sessionmaker)
+    fake_app = FakeApp()
+    register(fake_app)  # type: ignore[arg-type]
+    callbacks = fake_app.callbacks
+
+    batch_id, _ = await _seed_drafted_batch(test_sessionmaker, draft_texts=["x post"])
+    async with test_sessionmaker() as session:
+        async with session.begin():
+            await repo.set_batch_status(session, batch_id, BatchStatus.approved)
+
+    value = json.dumps({"b": str(batch_id)})
+    await _invoke(callbacks, "reopen_ideas", value=value, client=FakeClient())
+
+    async with test_sessionmaker() as session:
+        loaded = await repo.get_batch(session, batch_id)
+        assert loaded is not None
+        assert loaded.status is BatchStatus.approved  # unchanged
+
+
+# --------------------------------------------------------------------------- #
 # pick_idea (the ranked-idea picker -> draft).
 # --------------------------------------------------------------------------- #
 

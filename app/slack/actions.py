@@ -533,6 +533,56 @@ def register(app: AsyncApp) -> None:
             )
         logger.info("pick_idea_drafted", batch_id=str(b), draft_count=len(content.drafts))
 
+    @app.action("reopen_ideas")
+    async def reopen_ideas(
+        ack: Any, body: dict[str, Any], action: dict[str, Any], client: Any
+    ) -> None:
+        await ack()  # FIRST.
+
+        batch_id_s: str | None
+        try:
+            batch_id_s, _ = parse_action_value(action.get("value"))
+        except (json.JSONDecodeError, KeyError):
+            batch_id_s = _recover_batch_id(action)
+        try:
+            b = uuid.UUID(batch_id_s) if batch_id_s else None
+        except (ValueError, TypeError):
+            b = None
+
+        if b is None:
+            await client.chat_update(
+                channel=body.get("channel", {}).get("id", ""),
+                ts=body.get("message", {}).get("ts", ""),
+                blocks=_notice_blocks(
+                    "Sorry — I couldn't read that button. Run `/draft-post` again."
+                ),
+                text="Ghostwyre: couldn't read that button.",
+            )
+            return
+
+        # Only a still-`pending` (not yet published) batch can return to the picker —
+        # going back after publish would risk a second post. Reset to `selecting` and
+        # clear the claim in one txn, THEN re-render the stored ranked-idea card (no
+        # re-scan, no ranking cost). A non-pending batch just re-renders as-is.
+        async with SessionLocal() as session:
+            async with session.begin():
+                batch = await repo.get_batch(session, b)
+                if batch is None:
+                    return
+                if batch.status == BatchStatus.pending:
+                    await repo.set_batch_status(session, b, BatchStatus.selecting)
+                    await repo.set_chosen_idea(session, b, None)
+            batch = await repo.get_batch(session, b)
+
+        if batch is not None:
+            await _update_card(
+                client,
+                batch,
+                build_draft_blocks(batch, x_char_limit=settings.x_char_limit),
+                fallback_text(batch),
+            )
+        logger.info("ideas_reopened", batch_id=str(b))
+
     @app.action("cancel_batch")
     async def cancel_batch(
         ack: Any, body: dict[str, Any], action: dict[str, Any], client: Any

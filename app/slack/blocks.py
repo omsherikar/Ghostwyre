@@ -36,6 +36,7 @@ APPROVE_ACTION_ID = "approve_draft"
 REGENERATE_ACTION_ID = "regenerate_draft"
 CANCEL_ACTION_ID = "cancel_batch"
 PICK_ACTION_ID = "pick_idea"
+REOPEN_ACTION_ID = "reopen_ideas"
 
 
 def _encode_value(**fields: str) -> str:
@@ -179,17 +180,22 @@ def build_draft_blocks(
         ]
 
     if batch.status == BatchStatus.approved:
-        approved = next(
-            (d for d in batch.drafts if d.status == DraftStatus.approved),
-            None,
-        )
-        # Non-empty fallback: an empty section `text` is rejected by Slack. Only
-        # reachable on a contract violation (status=approved with no approved draft).
-        approved_text = approved.text if approved is not None else "_(draft unavailable)_"
-        return [
-            _section(approved_text),
-            _context("*Published (dry-run).*"),
-        ]
+        # Terminal but still useful: show EVERY draft, not just the published one —
+        # the approved (X) draft marked published, the others kept as copy-paste so a
+        # LinkedIn (no-API) draft isn't lost the moment X is approved. No buttons.
+        out: list[dict[str, Any]] = []
+        for draft in sorted(batch.drafts, key=lambda d: d.slot_index):
+            spec = PLATFORMS[str(draft.platform or DraftPlatform.x)]
+            out.append(_section(f"*{spec.label} draft*\n{draft.text}"))
+            if draft.status == DraftStatus.approved:
+                out.append(_context("✅ Published."))
+            else:
+                out.append(_context(f"Copy & paste into {spec.label} — it wasn't auto-published."))
+        # Non-empty fallback: Slack rejects an empty blocks list / empty section text.
+        # Only reachable on a contract violation (status=approved with no drafts).
+        if not out:
+            out = [_section("_(draft unavailable)_"), _context("*Published (dry-run).*")]
+        return out
 
     # Pending: the full interactive card (terminal states handled above).
     drafts = sorted(batch.drafts, key=lambda d: d.slot_index)
@@ -202,6 +208,23 @@ def build_draft_blocks(
     ]
     for draft in drafts:
         blocks.extend(_pending_draft_blocks(batch, draft, x_char_limit))
+    # When the batch was drafted from a ranked shortlist with more than one idea,
+    # offer a way back to the picker (no re-scan — the ideas are stored on the batch).
+    if batch.candidate_ideas and len(batch.candidate_ideas) > 1:
+        blocks.append(
+            {
+                "type": "actions",
+                "block_id": f"idea_actions:{batch.id}:reopen",
+                "elements": [
+                    {
+                        "type": "button",
+                        "action_id": REOPEN_ACTION_ID,
+                        "text": {"type": "plain_text", "text": "← Pick a different idea"},
+                        "value": _encode_value(b=str(batch.id)),
+                    }
+                ],
+            }
+        )
     return blocks
 
 

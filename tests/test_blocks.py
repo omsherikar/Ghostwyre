@@ -177,15 +177,19 @@ def test_expired_batch_is_terminal_tombstone_no_actions() -> None:
     assert len(sections) == 1
 
 
-def test_approved_batch_shows_approved_text_no_actions() -> None:
-    approved = _draft(0, "the-chosen-one", status=DraftStatus.approved)
-    other = _draft(1, "not-chosen", status=DraftStatus.pending)
+def test_approved_batch_keeps_all_drafts_no_actions() -> None:
+    # Approval is terminal (no buttons) but must NOT discard the other drafts: the
+    # published X draft is marked published; the LinkedIn draft stays copy-paste.
+    approved = _draft(0, "the-chosen-one", status=DraftStatus.approved, platform=DraftPlatform.x)
+    other = _draft(1, "still-copyable", status=DraftStatus.pending, platform=DraftPlatform.linkedin)
     batch = _batch([approved, other], status=BatchStatus.approved)
     blocks = build_draft_blocks(batch)
-    assert _actions_blocks(blocks) == []
+    assert _actions_blocks(blocks) == []  # terminal, no buttons
     rendered = _rendered_text(blocks)
-    assert "the-chosen-one" in rendered
-    assert "Published (dry-run)" in rendered
+    assert "the-chosen-one" in rendered  # published draft still shown
+    assert "Published" in rendered  # …and marked published
+    assert "still-copyable" in rendered  # the LinkedIn draft is NOT lost
+    assert "Copy & paste" in rendered  # …offered as copy-paste
 
 
 def test_regenerating_draft_renders_placeholder_no_buttons() -> None:
