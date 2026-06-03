@@ -79,7 +79,7 @@ Replace the single shallow pass with a transparent, inspectable pipeline:
 Learns from **your real posts** (RAG few-shot + memory, not tone sliders) · **platform-native** strategy with real engagement data · **transparent signal-finding with evidence** (not one shallow pass) · **improves every time you edit or approve**.
 
 ## Phasing (independently shippable)
-- **v2.0** — Onboarding + `VoiceProfile` + RAG few-shot + per-platform strategy. *(Biggest perceived-quality jump; drafts finally sound like the user.)*
+- **v2.0 — ✅ SHIPPED** (Pillars A + B). `/setup` onboarding modal → `distill_voice_profile` → a `VoiceProfile` per `(slack_user_id, platform)`; per-platform strategy in `app/platforms.py`; generation refactored to **one LLM pass per platform** (`generate_platform_draft`) fed that platform's voice card + positioning + strategy + a few of the user's real posts as exemplars (lightweight token-overlap selection, no embeddings yet); `/draft-post` + **Regenerate** wired to the invoker's voice, falling back to the `voice.md` seed when no profile exists. Exemplar count via `VOICE_EXEMPLAR_COUNT`. *(Biggest perceived-quality jump; drafts finally sound like the user.)*
 - **v2.1** — Multi-stage idea ranking with evidence + the "pick the idea" UI.
 - **v2.2** — Feedback memory loop (edits/approvals refine voice + ranking).
 

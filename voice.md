@@ -1,12 +1,15 @@
 # Voice
 
-This file is the moat. The drafts are only as good as what's here. It's loaded
-into the LLM (and prompt-cached) on every `/draft-post`.
+This file is the **seed / fallback voice** — used only until a user teaches their
+own voice with `/setup`. Once a user has a `VoiceProfile` (distilled from the real
+posts they paste in `/setup`), drafts for that user use *their* per-platform voice
+card instead of this file, and this file is no longer loaded for them.
 
 > **These are researched, generic "builder/developer" example posts** — a working
-> default so drafts read like a real person, not a press release. **Replace them with
-> 5–10 of YOUR real posts** when you can; nothing teaches the model your voice like
-> your own writing. The tone rules below are good to keep either way.
+> default so pre-onboarding drafts read like a real person, not a press release.
+> The real win is `/setup`: paste 5–10 of YOUR posts per platform and Ghostwyre
+> learns your voice directly. Nothing teaches the model your voice like your own
+> writing. The tone rules below are good defaults either way.
 
 ## Per-platform notes
 Each `/draft-post` produces one **LinkedIn** draft and one **X** draft from the
