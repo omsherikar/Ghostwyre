@@ -43,18 +43,21 @@ class PublisherClient(Protocol):
     async def publish(self, text: str) -> PublishResult: ...
 
 
-def _validate(text: str) -> None:
+def _validate(text: str, max_len: int = MAX_TWEET_LEN) -> None:
     if not text.strip():
         raise PublishError("Refusing to publish an empty post.")
-    if len(text) > MAX_TWEET_LEN:
-        raise PublishError(f"Post is {len(text)} chars; the limit is {MAX_TWEET_LEN}.")
+    if len(text) > max_len:
+        raise PublishError(f"Post is {len(text)} chars; the limit is {max_len}.")
 
 
 class DryRunPublisher:
     """Logs what *would* be posted and returns a fake link. No network calls."""
 
+    def __init__(self, max_len: int = MAX_TWEET_LEN) -> None:
+        self._max_len = max_len
+
     async def publish(self, text: str) -> PublishResult:
-        _validate(text)
+        _validate(text, self._max_len)
         logger.info("dry_run_publish", preview=redact(text, keep=40))
         return PublishResult(url="https://x.com/_dryrun/status/0", dry_run=True)
 
@@ -90,5 +93,5 @@ def get_publisher(settings: Settings) -> PublisherClient:
                 "PUBLISHER=x requires the `x` extra: `uv sync --extra x` "
                 "(or `pip install ghostwyre[x]`)."
             ) from exc
-        return XPublisher(build_client(settings))
-    return DryRunPublisher()
+        return XPublisher(build_client(settings), max_len=settings.x_char_limit)
+    return DryRunPublisher(settings.x_char_limit)

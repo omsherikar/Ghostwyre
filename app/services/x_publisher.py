@@ -23,6 +23,7 @@ import tweepy
 from app.config import Settings
 from app.logging import get_logger
 from app.services.publisher import (
+    MAX_TWEET_LEN,
     PublishError,
     PublishResult,
     PublishUnknownError,
@@ -69,11 +70,13 @@ class XPublisher:
     pass a fake and `build_client` stays the only place that needs credentials.
     """
 
-    def __init__(self, client: Any) -> None:
+    def __init__(self, client: Any, max_len: int = MAX_TWEET_LEN) -> None:
         self._client = client
+        self._max_len = max_len
 
     async def publish(self, text: str) -> PublishResult:
-        _validate(text)  # empty / >280 -> PublishError, before any network call
+        # empty / over the configured limit -> PublishError, before any network call.
+        _validate(text, self._max_len)
         try:
             resp = await asyncio.to_thread(self._client.create_tweet, text=text)
         except tweepy.Forbidden as exc:
