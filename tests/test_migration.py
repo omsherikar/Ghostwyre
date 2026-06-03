@@ -77,6 +77,20 @@ async def _draft_columns() -> set[str]:
         await engine.dispose()
 
 
+async def _draft_batch_columns() -> set[str]:
+    from app.config import get_settings
+
+    def _names(conn: Connection) -> set[str]:
+        return {c["name"] for c in inspect(conn).get_columns("draft_batch")}
+
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        async with engine.connect() as conn:
+            return await conn.run_sync(_names)
+    finally:
+        await engine.dispose()
+
+
 def _run_alembic(*args: str) -> None:
     """Run alembic in a subprocess (env.py runs its own asyncio loop)."""
     subprocess.run(
@@ -118,6 +132,9 @@ async def test_migration_upgrade_creates_tables() -> None:
 
     # The draft_platform migration adds the per-draft platform column.
     assert "platform" in await _draft_columns()
+
+    # v2.1 adds the ranked-idea columns to draft_batch.
+    assert {"candidate_ideas", "chosen_idea_index"} <= await _draft_batch_columns()
 
 
 @pytest.mark.slow

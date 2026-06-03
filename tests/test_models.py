@@ -80,8 +80,19 @@ def test_status_columns_compile_to_varchar_not_native_enum() -> None:
 def test_enum_values() -> None:
     assert BatchStatus.pending.value == "pending"
     assert BatchStatus.approved.value == "approved"
-    assert {m.value for m in ApprovalAction} == {"approve", "regenerate", "cancel"}
+    assert "selecting" in {m.value for m in BatchStatus}  # ranked ideas shown, pre-draft
+    assert {m.value for m in ApprovalAction} == {"approve", "regenerate", "cancel", "pick"}
     assert "regenerating" in {m.value for m in DraftStatus}
+
+
+def test_draft_batch_idea_columns() -> None:
+    cols = DraftBatch.__table__.c
+    # Ranked candidate ideas live on the batch as JSON (non-null, defaults to []).
+    assert "candidate_ideas" in cols
+    assert cols.candidate_ideas.nullable is False
+    # Which idea was drafted — null until the user picks.
+    assert "chosen_idea_index" in cols
+    assert cols.chosen_idea_index.nullable is True
 
 
 def test_draft_platform_enum_and_column() -> None:

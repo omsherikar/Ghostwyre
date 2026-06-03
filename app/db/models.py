@@ -18,6 +18,7 @@ from __future__ import annotations
 import enum
 import uuid
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import (
     JSON,
@@ -39,7 +40,8 @@ class Base(DeclarativeBase):
 
 
 class BatchStatus(enum.StrEnum):
-    pending = "pending"
+    selecting = "selecting"  # ranked ideas shown; awaiting the user's pick
+    pending = "pending"  # drafts generated; awaiting approval
     approved = "approved"
     cancelled = "cancelled"
     expired = "expired"
@@ -56,6 +58,7 @@ class ApprovalAction(enum.StrEnum):
     approve = "approve"
     regenerate = "regenerate"
     cancel = "cancel"
+    pick = "pick"  # user chose which ranked idea to draft
 
 
 class DraftPlatform(enum.StrEnum):
@@ -76,6 +79,13 @@ class DraftBatch(Base):
         nullable=False,
         default=BatchStatus.pending,
     )
+    # The ranked candidate ideas (each: summary/angle/score/evidence) surfaced for the
+    # user to pick from. CONFIDENTIAL — channel content at rest; never log, never in a
+    # button value. `chosen_idea_index` records which one was drafted (None until picked).
+    candidate_ideas: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, nullable=False, default=list, server_default="[]"
+    )
+    chosen_idea_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

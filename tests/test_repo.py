@@ -410,3 +410,52 @@ async def test_get_voice_profiles_keyed_by_platform(session: AsyncSession) -> No
 
 async def test_get_voice_profiles_absent_returns_empty(session: AsyncSession) -> None:
     assert await repo.get_voice_profiles(session, "nobody") == {}
+
+
+_IDEAS = [
+    {
+        "summary": "Shipped dark mode",
+        "angle": "Ship ugly.",
+        "score": 90,
+        "evidence": ["a: shipped"],
+    },
+    {"summary": "Killed a feature", "angle": "Letting go.", "score": 70, "evidence": ["b: killed"]},
+]
+
+
+async def test_create_idea_batch_persists_ideas_and_selecting(session: AsyncSession) -> None:
+    batch = await repo.create_idea_batch(
+        session,
+        channel_id=CHANNEL,
+        user_id=USER,
+        transcript=TRANSCRIPT,
+        candidate_ideas=_IDEAS,
+    )
+    assert batch.status is BatchStatus.selecting
+    assert batch.drafts == []  # no drafts until an idea is picked
+    assert batch.chosen_idea_index is None
+    assert batch.candidate_ideas == _IDEAS
+
+    # Ideas round-trip through get_batch.
+    loaded = await repo.get_batch(session, batch.id)
+    assert loaded is not None
+    assert loaded.candidate_ideas[0]["summary"] == "Shipped dark mode"
+
+
+async def test_set_chosen_idea_records_index(session: AsyncSession) -> None:
+    batch = await repo.create_idea_batch(
+        session,
+        channel_id=CHANNEL,
+        user_id=USER,
+        transcript=TRANSCRIPT,
+        candidate_ideas=_IDEAS,
+    )
+    await repo.set_chosen_idea(session, batch.id, 1)
+    loaded = await repo.get_batch(session, batch.id)
+    assert loaded is not None
+    assert loaded.chosen_idea_index == 1
+
+
+async def test_set_chosen_idea_missing_raises(session: AsyncSession) -> None:
+    with pytest.raises(LookupError):
+        await repo.set_chosen_idea(session, uuid.uuid4(), 0)

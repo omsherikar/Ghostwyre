@@ -66,6 +66,41 @@ async def create_batch(
     return batch
 
 
+async def create_idea_batch(
+    session: AsyncSession,
+    *,
+    channel_id: str,
+    user_id: str,
+    transcript: str,
+    candidate_ideas: list[dict[str, Any]],
+) -> DraftBatch:
+    """Persist a `selecting` batch carrying the ranked candidate ideas (no drafts yet).
+
+    The ideas are stored as JSON on the batch; the pick action later reads the
+    chosen one by index, drafts it, and flips the batch to `pending`.
+    """
+    batch = DraftBatch(
+        slack_channel_id=channel_id,
+        slack_user_id=user_id,
+        transcript=transcript,
+        status=BatchStatus.selecting,
+        candidate_ideas=candidate_ideas,
+    )
+    session.add(batch)
+    await session.flush()
+    await session.refresh(batch, ["drafts"])
+    return batch
+
+
+async def set_chosen_idea(session: AsyncSession, batch_id: uuid.UUID, index: int) -> None:
+    """Record which ranked idea (by index) the user chose to draft."""
+    batch = await session.get(DraftBatch, batch_id)
+    if batch is None:
+        raise LookupError(f"DraftBatch {batch_id} not found")
+    batch.chosen_idea_index = index
+    await session.flush()
+
+
 async def get_batch(session: AsyncSession, batch_id: uuid.UUID) -> DraftBatch | None:
     """Load a batch with its drafts (slot-ordered) and events, or None if missing."""
     result = await session.execute(
