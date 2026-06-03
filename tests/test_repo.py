@@ -459,3 +459,28 @@ async def test_set_chosen_idea_records_index(session: AsyncSession) -> None:
 async def test_set_chosen_idea_missing_raises(session: AsyncSession) -> None:
     with pytest.raises(LookupError):
         await repo.set_chosen_idea(session, uuid.uuid4(), 0)
+
+
+async def test_set_chosen_idea_can_clear(session: AsyncSession) -> None:
+    batch = await repo.create_idea_batch(
+        session, channel_id=CHANNEL, user_id=USER, transcript=TRANSCRIPT, candidate_ideas=_IDEAS
+    )
+    await repo.set_chosen_idea(session, batch.id, 0)
+    await repo.set_chosen_idea(session, batch.id, None)  # clear (release the claim)
+    await session.refresh(batch)
+    assert batch.chosen_idea_index is None
+
+
+async def test_claim_idea_for_drafting_wins_once_then_loses(session: AsyncSession) -> None:
+    batch = await repo.create_idea_batch(
+        session, channel_id=CHANNEL, user_id=USER, transcript=TRANSCRIPT, candidate_ideas=_IDEAS
+    )
+    # First claim wins; a concurrent second claim (any index) loses the CAS.
+    assert await repo.claim_idea_for_drafting(session, batch.id, 0) is True
+    assert await repo.claim_idea_for_drafting(session, batch.id, 1) is False
+    await session.refresh(batch)
+    assert batch.chosen_idea_index == 0  # the winner's index stuck
+
+
+async def test_claim_idea_for_drafting_unknown_returns_false(session: AsyncSession) -> None:
+    assert await repo.claim_idea_for_drafting(session, uuid.uuid4(), 0) is False

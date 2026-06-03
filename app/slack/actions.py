@@ -464,6 +464,24 @@ def register(app: AsyncApp) -> None:
         transcript = batch.transcript  # CONFIDENTIAL — never logged.
         idea = _idea_from_dict(ideas[idea_index])
 
+        # Atomically claim this idea BEFORE the (expensive) LLM call. A concurrent
+        # second click loses the CAS and just re-renders — at-most-once drafting,
+        # the pick-side sibling of approve's claim_for_publish.
+        async with SessionLocal() as session:
+            async with session.begin():
+                claimed = await repo.claim_idea_for_drafting(session, b, idea_index)
+        if not claimed:
+            async with SessionLocal() as session:
+                batch = await repo.get_batch(session, b)
+            if batch is not None:
+                await _update_card(
+                    client,
+                    batch,
+                    build_draft_blocks(batch, x_char_limit=settings.x_char_limit),
+                    fallback_text(batch),
+                )
+            return
+
         # Interim feedback (no transaction held) so the user can't double-fire.
         await _update_card(client, batch, _drafting_blocks(), "Ghostwyre: drafting your post…")
 
@@ -473,7 +491,10 @@ def register(app: AsyncApp) -> None:
             )
         except Exception:
             logger.exception("pick_idea_failed", batch_id=str(b))
+            # Release the claim so the user can pick again, then re-render the picker.
             async with SessionLocal() as session:
+                async with session.begin():
+                    await repo.set_chosen_idea(session, b, None)
                 batch = await repo.get_batch(session, b)
             if batch is not None:
                 blocks = build_idea_blocks(batch)
@@ -481,10 +502,10 @@ def register(app: AsyncApp) -> None:
                 await _update_card(client, batch, blocks, "Ghostwyre: drafting failed.")
             return
 
-        # Persist the chosen idea + its drafts, flip selecting -> pending, audit, render.
+        # Persist the drafts, flip selecting -> pending, audit, render. The chosen
+        # index was already set atomically by the claim above.
         async with SessionLocal() as session:
             async with session.begin():
-                await repo.set_chosen_idea(session, b, idea_index)
                 await repo.replace_drafts(
                     session,
                     b,
@@ -540,13 +561,15 @@ def register(app: AsyncApp) -> None:
             return
 
         # Mark cancelled in one short transaction, THEN render outside it (a failed
-        # chat_update can't roll the cancel back). A non-pending batch just re-renders.
+        # chat_update can't roll the cancel back). Cancellable from either live state:
+        # `pending` (approval card) or `selecting` (the ranked-idea card's Cancel button).
+        # An already-terminal batch just re-renders.
         async with SessionLocal() as session:
             async with session.begin():
                 batch = await repo.get_batch(session, b)
                 if batch is None:
                     return
-                if batch.status == BatchStatus.pending:
+                if batch.status in (BatchStatus.pending, BatchStatus.selecting):
                     await repo.set_batch_status(session, b, BatchStatus.cancelled)
                     await repo.record_event(
                         session,

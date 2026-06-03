@@ -647,6 +647,36 @@ async def test_cancel_marks_cancelled_and_records_event(
 
 @_db_test
 @_db_loop
+async def test_cancel_selecting_batch_from_idea_card(
+    monkeypatch: pytest.MonkeyPatch,
+    test_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    # The ranked-idea card's Cancel must cancel a `selecting` batch (regression:
+    # it used to only act on `pending`, leaving the idea card stuck + degenerate).
+    monkeypatch.setattr(actions, "SessionLocal", test_sessionmaker)
+    fake_app = FakeApp()
+    register(fake_app)  # type: ignore[arg-type]
+    callbacks = fake_app.callbacks
+
+    batch_id = await _seed_selecting_batch(test_sessionmaker)
+    value = json.dumps({"b": str(batch_id)})
+    client = FakeClient()
+
+    await _invoke(callbacks, "cancel_batch", value=value, client=client)
+
+    async with test_sessionmaker() as session:
+        loaded = await repo.get_batch(session, batch_id)
+        assert loaded is not None
+        assert loaded.status is BatchStatus.cancelled
+        assert any(e.action is ApprovalAction.cancel for e in loaded.events)
+
+    final_blocks = client.updates[-1]["blocks"]
+    assert not _has_actions_block(final_blocks)  # tombstone, no buttons
+    assert "cancelled" in json.dumps(final_blocks).lower()
+
+
+@_db_test
+@_db_loop
 async def test_unknown_batch_id_friendly_update(
     monkeypatch: pytest.MonkeyPatch,
     test_sessionmaker: async_sessionmaker[AsyncSession],
@@ -797,6 +827,41 @@ async def test_pick_idea_drafts_and_flips_to_pending(
     # interim ("Drafting…") + final approval card.
     assert len(client.updates) >= 2
     assert "drafted-x" in json.dumps(client.updates[-1]["blocks"])
+
+
+@_db_test
+@_db_loop
+async def test_pick_idea_lost_claim_does_not_draft(
+    monkeypatch: pytest.MonkeyPatch,
+    test_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    # A concurrent pick that loses the claim (chosen_idea_index already set) must
+    # NOT fire a second LLM draft — the at-most-once drafting CAS.
+    monkeypatch.setattr(actions, "SessionLocal", test_sessionmaker)
+
+    async def boom(*args: Any, **kwargs: Any) -> ContentResult:
+        raise AssertionError("must not draft when the claim is lost")
+
+    monkeypatch.setattr(actions, "generate_idea_drafts", boom)
+    fake_app = FakeApp()
+    register(fake_app)  # type: ignore[arg-type]
+    callbacks = fake_app.callbacks
+
+    batch_id = await _seed_selecting_batch(test_sessionmaker)
+    # Simulate another in-flight pick that already claimed idea 0.
+    async with test_sessionmaker() as session:
+        async with session.begin():
+            await repo.set_chosen_idea(session, batch_id, 0)
+
+    value = json.dumps({"b": str(batch_id), "i": 1})
+    await _invoke(callbacks, "pick_idea", value=value, client=FakeClient())
+
+    async with test_sessionmaker() as session:
+        loaded = await repo.get_batch(session, batch_id)
+        assert loaded is not None
+        assert loaded.status is BatchStatus.selecting  # not drafted
+        assert loaded.chosen_idea_index == 0  # winner's claim untouched
+        assert not [e for e in loaded.events if e.action is ApprovalAction.pick]
 
 
 @_db_test

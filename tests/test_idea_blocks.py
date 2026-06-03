@@ -13,7 +13,9 @@ from typing import Any
 from app.db.models import BatchStatus, DraftBatch
 from app.slack.blocks import (
     PICK_ACTION_ID,
+    build_draft_blocks,
     build_idea_blocks,
+    fallback_text,
     idea_fallback_text,
 )
 
@@ -89,3 +91,16 @@ def test_evidence_quotes_render_in_card() -> None:
 def test_idea_fallback_text_counts() -> None:
     assert "2 ideas" in idea_fallback_text(_batch(IDEAS))
     assert "1 idea" in idea_fallback_text(_batch(IDEAS[:1]))
+
+
+def test_build_draft_blocks_renders_idea_card_for_selecting() -> None:
+    # A `selecting` batch has no drafts; build_draft_blocks must route to the idea
+    # picker, never a degenerate buttonless "drafts" card (regression guard).
+    batch = _batch(IDEAS)  # status=selecting
+    rendered = json.dumps(build_draft_blocks(batch))
+    assert PICK_ACTION_ID in rendered
+    assert "Shipped dark mode" in rendered
+
+
+def test_fallback_text_for_selecting_is_idea_text() -> None:
+    assert "ideas worth posting" in fallback_text(_batch(IDEAS))

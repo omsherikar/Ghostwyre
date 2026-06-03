@@ -46,6 +46,8 @@ def _encode_value(**fields: str) -> str:
 def fallback_text(batch: DraftBatch) -> str:
     """Short plain-text notification line for the posted/updated card."""
     n = len(batch.drafts)
+    if batch.status == BatchStatus.selecting:
+        return idea_fallback_text(batch)
     if batch.status == BatchStatus.cancelled:
         return "Ghostwyre: drafts cancelled — nothing was published."
     if batch.status == BatchStatus.approved:
@@ -166,6 +168,11 @@ def build_draft_blocks(
     Returns ONLY the blocks list — the caller pairs it with `fallback_text(batch)`
     for the top-level `text` field when posting/updating.
     """
+    if batch.status == BatchStatus.selecting:
+        # A pre-draft batch has no drafts; render the ranked-idea picker instead, so
+        # no caller can ever produce a degenerate, buttonless "drafts" card.
+        return build_idea_blocks(batch)
+
     if batch.status in (BatchStatus.cancelled, BatchStatus.expired):
         return [
             _section("~Drafts cancelled~ — nothing was published. Run /draft-post to start over.")
