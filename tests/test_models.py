@@ -18,6 +18,7 @@ from app.db.models import (
     DraftBatch,
     DraftPlatform,
     DraftStatus,
+    VoiceProfile,
 )
 
 
@@ -101,3 +102,16 @@ def test_db_package_reexports_session_local() -> None:
     from app.db import SessionLocal
 
     assert SessionLocal is not None
+
+
+def test_voice_profile_columns_and_unique() -> None:
+    cols = VoiceProfile.__table__.c
+    assert {"slack_user_id", "platform", "sample_posts", "voice_card", "positioning"} <= set(
+        cols.keys()
+    )
+    # Per-platform voice keyed by (user, platform).
+    names = {c.name for c in VoiceProfile.__table__.constraints if c.name is not None}
+    assert "uq_voice_user_platform" in names
+    # platform stored as VARCHAR (native_enum=False), like the other enums.
+    compiled = cols.platform.type.compile(dialect=postgresql.dialect())
+    assert compiled.startswith("VARCHAR")

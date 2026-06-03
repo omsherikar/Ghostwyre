@@ -28,8 +28,9 @@ from pydantic import BaseModel, ValidationError
 
 from app.config import Settings, get_settings
 from app.logging import get_logger
+from app.platforms import PLATFORMS
 from app.services.json_parse import JSONParseError, loads_lenient
-from app.services.schemas import DraftSet, PostworthyItem, PostworthyResult
+from app.services.schemas import Draft, DraftText, PostworthyItem, PostworthyResult, VoiceCard
 
 logger = get_logger(__name__)
 
@@ -210,93 +211,153 @@ async def extract_postworthy(
     return result
 
 
-DRAFT_SCHEMA = {
+PLATFORM_DRAFT_SCHEMA = {
     "type": "object",
-    "properties": {
-        "drafts": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "platform": {"type": "string", "enum": ["x", "linkedin"]},
-                    "text": {"type": "string"},
-                },
-                "required": ["platform", "text"],
-                "additionalProperties": False,
-            },
-        }
-    },
-    "required": ["drafts"],
+    "properties": {"text": {"type": "string"}},
+    "required": ["text"],
     "additionalProperties": False,
 }
 
 DRAFT_SYSTEM = """\
-You write social-media posts in the user's voice, grounded in a real team
-conversation. You are given: the postworthy insight(s) extracted from the chat,
-the conversation transcript itself, and a separate voice guide.
+You write ONE social-media post for a specific platform, in the user's voice,
+grounded in a real team conversation.
 
-Pick the single strongest insight and write TWO posts about it — one for LinkedIn
-and one for X — each developed and specific, drawing on the ACTUAL details of the
-conversation (what was built, the numbers, the decision, the lesson), not generic
-platitudes.
+You are given: the postworthy insight(s) from the chat, the conversation
+transcript, the target platform's strategy, the user's VOICE GUIDE (how they
+write), and a few of the user's REAL PAST POSTS as voice examples.
 
-Per platform:
-- linkedin: a developed, multi-paragraph post (roughly 600-1300 characters). Open
-  with a hook, develop the insight with the concrete specifics, close with a crisp
-  takeaway. Short paragraphs separated by blank lines read well.
-- x: a developed long-form post — go past a single line; lead with the sharpest
-  point and build the argument. Substantive, not a teaser.
+Write a single post about the strongest insight that:
+- sounds like the user — match the voice guide and the rhythm/phrasing of their
+  real example posts (write something NEW in the same voice; never copy a post);
+- follows the platform strategy (length, hook, shape);
+- is grounded in the conversation's real specifics — never invent facts;
+- never includes anything confidential (secrets or credentials, customer or
+  client names, internal financials, unreleased plans);
+- adds no hashtags or emojis unless the voice guide allows them.
 
-Strict rules:
-- Treat the voice guide as the source of truth for tone and style; match it.
-- Ground every post in the conversation's real specifics. Never invent facts.
-- Never include anything confidential: secrets or credentials, customer or client
-  names, internal financials, or unreleased plans.
-- Do NOT add hashtags or emojis unless the voice guide explicitly allows them.
-- Output exactly one `linkedin` post and one `x` post. No preamble, no commentary."""
+Output only the post text — no preamble, no commentary, no surrounding quotes."""
 
 
-def _render_draft_request(items: list[PostworthyItem], transcript: str) -> str:
-    """Build the draft prompt: the postworthy insight(s) + the grounding transcript."""
+def _render_platform_request(
+    items: list[PostworthyItem],
+    transcript: str,
+    positioning: str,
+    exemplars: list[str],
+) -> str:
+    """Build the per-platform draft prompt: positioning + insights + transcript + exemplars."""
     insights = "\n".join(f"- {item.summary} (why: {item.reason})" for item in items)
+    pos = f"The user's positioning: {positioning}\n\n" if positioning.strip() else ""
+    examples = ""
+    if exemplars:
+        joined = "\n\n---\n\n".join(exemplars)
+        examples = (
+            f"The user's real past posts — match this voice, do NOT copy them:\n\n{joined}\n\n"
+        )
     return (
+        f"{pos}"
         "Postworthy insight(s) from the conversation:\n"
         f"{insights}\n\n"
-        "The conversation transcript (ground the posts in these real specifics):\n"
+        "The conversation transcript (ground the post in these real specifics):\n"
         f"{transcript}\n\n"
-        "Write one LinkedIn post and one X post about the strongest insight, in the "
-        "user's voice."
+        f"{examples}"
+        "Write one post about the strongest insight, in the user's voice."
     )
 
 
-async def generate_drafts(
+async def generate_platform_draft(
     items: list[PostworthyItem],
-    voice: str,
+    platform: str,
     *,
+    voice_card: str,
+    positioning: str,
+    exemplars: list[str],
     transcript: str,
     client: LLMClient,
     settings: Settings,
-) -> DraftSet:
-    """Draft a long LinkedIn post + a long X post from postworthy *items*.
+) -> Draft:
+    """Draft ONE post for *platform*, in the user's voice, grounded in the transcript.
 
-    Both are written in the user's *voice* and grounded in the *transcript* (the
-    actual conversation). The stable draft instructions and the voice guide are
-    sent as system blocks; the voice block carries `cache_control` so system+voice
-    cache together. Uses the larger draft token budget. Retries the call+parse
-    exactly once on failure. Never logs the transcript or draft text.
+    System blocks: the draft rules + the platform's strategy + the user's voice
+    card (cached). The user's positioning, the insights, the transcript, and the
+    exemplar posts go in the user message. Retries the call+parse once. Never logs
+    the transcript, exemplars, or draft text.
     """
     system: list[TextBlockParam] = [
         {"type": "text", "text": DRAFT_SYSTEM},
-        {"type": "text", "text": voice, "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": f"Target platform strategy:\n\n{PLATFORMS[platform].strategy}"},
+        {
+            "type": "text",
+            "text": f"The user's voice guide:\n\n{voice_card}",
+            "cache_control": {"type": "ephemeral"},
+        },
     ]
     result = await _structured_call(
         client=client,
         settings=settings,
         system=system,
-        user=_render_draft_request(items, transcript),
-        schema=DRAFT_SCHEMA,
-        model_cls=DraftSet,
+        user=_render_platform_request(items, transcript, positioning, exemplars),
+        schema=PLATFORM_DRAFT_SCHEMA,
+        model_cls=DraftText,
         max_tokens=settings.draft_max_tokens,
     )
-    logger.info("drafts_generate_complete", draft_count=len(result.drafts))
+    logger.info("platform_draft_complete", platform=platform)
+    return Draft(platform=platform, text=result.text)
+
+
+VOICE_DISTILL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "voice_card": {"type": "string"},
+        "positioning": {"type": "string"},
+    },
+    "required": ["voice_card", "positioning"],
+    "additionalProperties": False,
+}
+
+VOICE_DISTILL_SYSTEM = """\
+You analyze a person's real social-media posts for one platform and distill HOW
+they write, so another system can draft new posts that sound exactly like them.
+
+Produce two things:
+- voice_card: a concrete, prescriptive style guide derived ONLY from the posts —
+  their hooks/openers, sentence rhythm and length, vocabulary and signature
+  phrases, formatting habits (line breaks, lists, emoji/hashtag usage), recurring
+  themes, and the things they clearly never do. Write it as direct rules a writer
+  could follow. Be specific and cite patterns you actually observe — never invent.
+- positioning: 2-3 sentences on who they are and what they want to be known for,
+  combining the themes in their posts with their stated goal (if any).
+
+Do not quote a whole post as a "rule" — describe the underlying pattern."""
+
+
+def _render_distill_request(posts: list[str], goals: str, platform: str) -> str:
+    """Build the distillation prompt from the user's posts + stated goal."""
+    numbered = "\n\n".join(f"[Post {i}]\n{post}" for i, post in enumerate(posts, start=1))
+    goal_line = f"Their stated goal: {goals}\n\n" if goals.strip() else ""
+    return f"Platform: {platform}\n\n{goal_line}Their real posts:\n\n{numbered}"
+
+
+async def distill_voice_profile(
+    posts: list[str],
+    goals: str,
+    platform: str,
+    *,
+    client: LLMClient,
+    settings: Settings,
+) -> VoiceCard:
+    """Distill a per-platform voice card + positioning from the user's real *posts*.
+
+    Reuses the structured-output + retry-once machinery. Never logs the posts.
+    """
+    system: list[TextBlockParam] = [{"type": "text", "text": VOICE_DISTILL_SYSTEM}]
+    result = await _structured_call(
+        client=client,
+        settings=settings,
+        system=system,
+        user=_render_distill_request(posts, goals, platform),
+        schema=VOICE_DISTILL_SCHEMA,
+        model_cls=VoiceCard,
+        max_tokens=settings.draft_max_tokens,
+    )
+    logger.info("voice_distill_complete", platform=platform, post_count=len(posts))
     return result

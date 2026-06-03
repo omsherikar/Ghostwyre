@@ -33,7 +33,7 @@ from app.db import SessionLocal
 from app.db.models import ApprovalAction, BatchStatus, DraftBatch, DraftPlatform, DraftStatus
 from app.logging import get_logger
 from app.platforms import PLATFORMS
-from app.services.content import generate_post_drafts, load_voice
+from app.services.content import build_voices, generate_post_drafts, load_voice
 from app.services.llm import build_client
 from app.services.publisher import (
     PublisherClient,
@@ -292,8 +292,15 @@ def register(app: AsyncApp) -> None:
             return
 
         # Read + guard (no writes). Re-render of a terminal batch happens outside.
+        # Build the original invoker's per-platform voices in the same session (their
+        # stored profile where it exists, else the voice.md seed).
         async with SessionLocal() as session:
             batch = await repo.get_batch(session, b)
+            voices = (
+                build_voices(await repo.get_voice_profiles(session, batch.slack_user_id), voice)
+                if batch is not None
+                else {}
+            )
         if batch is None or batch.status != BatchStatus.pending:
             if batch is not None:
                 await _update_card(
@@ -313,7 +320,7 @@ def register(app: AsyncApp) -> None:
         # The LLM call runs with no DB transaction open.
         try:
             result = await generate_post_drafts(
-                transcript, voice, client=anthropic_client, settings=settings
+                transcript, voices, client=anthropic_client, settings=settings
             )
         except Exception:
             logger.exception("regenerate_failed", batch_id=str(b))

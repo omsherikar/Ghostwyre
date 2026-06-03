@@ -19,6 +19,7 @@ from app.config import get_settings
 from app.logging import configure_logging, get_logger
 from app.slack.actions import register as register_actions
 from app.slack.commands import register as register_commands
+from app.slack.onboarding import register as register_onboarding
 
 settings = get_settings()
 configure_logging(settings.log_level)
@@ -30,6 +31,7 @@ bolt_app = AsyncApp(
 )
 register_commands(bolt_app)
 register_actions(bolt_app)
+register_onboarding(bolt_app)
 
 
 @asynccontextmanager

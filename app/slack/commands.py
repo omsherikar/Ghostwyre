@@ -21,7 +21,7 @@ from app.config import get_settings
 from app.db import SessionLocal
 from app.db.models import DraftPlatform
 from app.logging import get_logger
-from app.services.content import generate_post_drafts, load_voice
+from app.services.content import build_voices, generate_post_drafts, load_voice
 from app.services.llm import build_client
 from app.services.schemas import Draft
 from app.slack.blocks import (
@@ -81,9 +81,16 @@ def register(app: AsyncApp) -> None:
             )
             return
 
+        # Build the invoker's per-platform voices: their stored profile where it
+        # exists, else the voice.md seed. Build inside the session so the profile
+        # rows' attrs are read while still attached.
+        async with SessionLocal() as session:
+            profiles = await repo.get_voice_profiles(session, command["user_id"])
+            voices = build_voices(profiles, voice)
+
         try:
             result = await generate_post_drafts(
-                transcript, voice, client=anthropic_client, settings=settings
+                transcript, voices, client=anthropic_client, settings=settings
             )
         except Exception:
             logger.exception("draft_post_generation_failed", channel=channel)

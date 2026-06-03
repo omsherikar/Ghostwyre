@@ -434,6 +434,50 @@ async def test_regenerate_replaces_drafts_and_records_event(
 
 @_db_test
 @_db_loop
+async def test_regenerate_uses_invokers_voice_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    test_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    # Regeneration must use the ORIGINAL invoker's (batch.slack_user_id) stored
+    # voice — its card + sample posts reach generation as that platform's context.
+    monkeypatch.setattr(actions, "SessionLocal", test_sessionmaker)
+
+    captured: dict[str, Any] = {}
+
+    async def fake_generate(*args: Any, **kwargs: Any) -> ContentResult:
+        captured["voices"] = args[1] if len(args) > 1 else kwargs.get("voices")
+        return ContentResult(postworthy=True, drafts=[Draft(text="fresh")])
+
+    monkeypatch.setattr(actions, "generate_post_drafts", fake_generate)
+    fake_app = FakeApp()
+    register(fake_app)  # type: ignore[arg-type]
+    callbacks = fake_app.callbacks
+
+    async with test_sessionmaker() as session:
+        async with session.begin():
+            await repo.upsert_voice_profile(
+                session,
+                slack_user_id=USER,
+                platform=DraftPlatform.x,
+                sample_posts=["mine1", "mine2"],
+                voice_card="USER X VOICE",
+                positioning="testing",
+            )
+
+    batch_id, draft_ids = await _seed_pending_batch(test_sessionmaker, draft_texts=["old"])
+    value = json.dumps({"b": str(batch_id), "d": str(draft_ids[0])})
+
+    await _invoke(callbacks, "regenerate_draft", value=value, client=FakeClient())
+
+    voices = captured["voices"]
+    assert voices is not None
+    assert voices["x"].voice_card == "USER X VOICE"
+    assert voices["x"].sample_posts == ["mine1", "mine2"]
+    assert voices["x"].positioning == "testing"
+
+
+@_db_test
+@_db_loop
 async def test_regenerate_failure_keeps_old_drafts(
     monkeypatch: pytest.MonkeyPatch,
     test_sessionmaker: async_sessionmaker[AsyncSession],

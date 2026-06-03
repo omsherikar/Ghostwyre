@@ -130,6 +130,15 @@ def _command() -> dict[str, Any]:
     return {"channel_id": CHANNEL, "user_id": USER}
 
 
+class FakeVoiceProfile:
+    """Duck-typed stand-in for a VoiceProfile row (build_voices reads these attrs)."""
+
+    def __init__(self, *, voice_card: str, positioning: str, sample_posts: list[str]) -> None:
+        self.voice_card = voice_card
+        self.positioning = positioning
+        self.sample_posts = sample_posts
+
+
 class Recorder:
     """Shared call log + fake repo functions so we can assert ordering/args."""
 
@@ -138,6 +147,8 @@ class Recorder:
         self.create_kwargs: dict[str, Any] | None = None
         self.set_ts_args: tuple[Any, ...] | None = None
         self.batch: FakeBatch | None = None
+        self.voices: dict[str, Any] | None = None  # the voices map passed to generation
+        self.voice_user_id: str | None = None  # the user id voice profiles were fetched for
 
     async def create_batch(
         self,
@@ -170,6 +181,7 @@ def _wire(
     *,
     result: ContentResult | None = None,
     generate_raises: bool = False,
+    profiles: dict[str, Any] | None = None,
 ) -> tuple[Recorder, FakeClient]:
     """Monkeypatch the DB + content collaborators; return (recorder, client)."""
     rec = Recorder()
@@ -177,8 +189,16 @@ def _wire(
     monkeypatch.setattr(repo, "create_batch", rec.create_batch)
     monkeypatch.setattr(repo, "set_batch_message_ts", rec.set_batch_message_ts)
 
+    async def fake_get_voice_profiles(session: Any, slack_user_id: str) -> dict[str, Any]:
+        rec.calls.append("get_voice_profiles")
+        rec.voice_user_id = slack_user_id
+        return profiles or {}
+
+    monkeypatch.setattr(repo, "get_voice_profiles", fake_get_voice_profiles)
+
     async def fake_generate(*args: Any, **kwargs: Any) -> ContentResult:
         rec.calls.append("generate")
+        rec.voices = args[1] if len(args) > 1 else kwargs.get("voices")
         if generate_raises:
             raise RuntimeError("LLM exploded")
         assert result is not None
@@ -206,8 +226,11 @@ async def _run(
     result: ContentResult | None = None,
     generate_raises: bool = False,
     client: FakeClient | None = None,
+    profiles: dict[str, Any] | None = None,
 ) -> tuple[Recorder, FakeClient, RespondRecorder]:
-    rec, default_client = _wire(monkeypatch, result=result, generate_raises=generate_raises)
+    rec, default_client = _wire(
+        monkeypatch, result=result, generate_raises=generate_raises, profiles=profiles
+    )
     cl = client if client is not None else default_client
     cl.call_log = rec.calls  # so chat_postMessage ordering is in the shared log
     fake_app = FakeApp()
@@ -332,6 +355,40 @@ async def test_transcript_passed_equals_to_transcript_output(
 
     assert rec.create_kwargs is not None
     assert rec.create_kwargs["transcript"] == expected
+
+
+@pytest.mark.asyncio
+async def test_uses_invokers_stored_voice_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A stored profile for the invoker is fetched for command["user_id"] and its
+    # voice card + sample posts reach generation as that platform's VoiceContext.
+    profiles = {
+        "x": FakeVoiceProfile(
+            voice_card="USER X VOICE", positioning="known for testing", sample_posts=["p1", "p2"]
+        )
+    }
+    result = ContentResult(postworthy=True, drafts=[Draft(text="d0")])
+    rec, client, respond = await _run(monkeypatch, result=result, profiles=profiles)
+
+    assert rec.voice_user_id == USER
+    assert rec.voices is not None
+    assert rec.voices["x"].voice_card == "USER X VOICE"
+    assert rec.voices["x"].positioning == "known for testing"
+    assert rec.voices["x"].sample_posts == ["p1", "p2"]
+
+
+@pytest.mark.asyncio
+async def test_falls_back_to_seed_when_no_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    # No stored profile -> every platform falls back to the voice.md seed
+    # (no exemplars). The seed path is the most-tested (pre-onboarding) path.
+    from app.platforms import PLATFORMS
+
+    result = ContentResult(postworthy=True, drafts=[Draft(text="d0")])
+    rec, client, respond = await _run(monkeypatch, result=result)
+
+    assert rec.voices is not None
+    assert set(rec.voices) == set(PLATFORMS)
+    for ctx in rec.voices.values():
+        assert ctx.sample_posts == []  # seed has no exemplars
 
 
 @pytest.mark.asyncio

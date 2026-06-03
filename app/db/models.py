@@ -20,6 +20,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
+    JSON,
     DateTime,
     Enum,
     ForeignKey,
@@ -157,3 +158,34 @@ class ApprovalEvent(Base):
 
     batch: Mapped[DraftBatch] = relationship("DraftBatch", back_populates="events")
     draft: Mapped[Draft | None] = relationship("Draft", back_populates="events")
+
+
+class VoiceProfile(Base):
+    """A user's learned voice for ONE platform, keyed by (slack_user_id, platform).
+
+    Holds the user's real sample posts, an LLM-distilled `voice_card` (style
+    hypotheses), and a short `positioning` blurb. `sample_posts`/`voice_card` are
+    user content at rest — never log them, never put them in a Slack button value.
+    """
+
+    __tablename__ = "voice_profile"
+    __table_args__ = (UniqueConstraint("slack_user_id", "platform", name="uq_voice_user_platform"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    slack_user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    platform: Mapped[DraftPlatform] = mapped_column(
+        Enum(DraftPlatform, native_enum=False, values_callable=lambda e: [m.value for m in e]),
+        nullable=False,
+    )
+    sample_posts: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    voice_card: Mapped[str] = mapped_column(Text, nullable=False)
+    positioning: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )

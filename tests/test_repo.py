@@ -359,3 +359,54 @@ async def test_list_unconfirmed_approved(session: AsyncSession) -> None:
     assert crash.id in ids
     assert ok.id not in ids
     assert pend.id not in ids
+
+
+async def test_upsert_voice_profile_creates_then_updates(session: AsyncSession) -> None:
+    first = await repo.upsert_voice_profile(
+        session,
+        slack_user_id="U1",
+        platform=DraftPlatform.x,
+        sample_posts=["a", "b"],
+        voice_card="card v1",
+        positioning="pos",
+    )
+    assert first.sample_posts == ["a", "b"]
+
+    second = await repo.upsert_voice_profile(
+        session,
+        slack_user_id="U1",
+        platform=DraftPlatform.x,
+        sample_posts=["c"],
+        voice_card="card v2",
+        positioning="pos2",
+    )
+    assert second.id == first.id  # updated in place, not a new row
+    assert second.voice_card == "card v2"
+    assert second.sample_posts == ["c"]
+
+
+async def test_get_voice_profiles_keyed_by_platform(session: AsyncSession) -> None:
+    await repo.upsert_voice_profile(
+        session,
+        slack_user_id="U2",
+        platform=DraftPlatform.x,
+        sample_posts=["x post"],
+        voice_card="xc",
+        positioning="",
+    )
+    await repo.upsert_voice_profile(
+        session,
+        slack_user_id="U2",
+        platform=DraftPlatform.linkedin,
+        sample_posts=["li post"],
+        voice_card="lic",
+        positioning="",
+    )
+
+    profiles = await repo.get_voice_profiles(session, "U2")
+    assert set(profiles) == {"x", "linkedin"}
+    assert profiles["linkedin"].voice_card == "lic"
+
+
+async def test_get_voice_profiles_absent_returns_empty(session: AsyncSession) -> None:
+    assert await repo.get_voice_profiles(session, "nobody") == {}

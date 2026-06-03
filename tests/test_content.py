@@ -9,7 +9,12 @@ from typing import Any
 import pytest
 
 from app.config import Settings
-from app.services.content import ContentResult, generate_post_drafts, load_voice
+from app.services.content import (
+    ContentResult,
+    generate_post_drafts,
+    load_voice,
+    seed_voices,
+)
 
 
 class FakeTextBlock:
@@ -51,47 +56,33 @@ async def test_nothing_postworthy_skips_drafting() -> None:
     client = FakeClient([json.dumps({"items": []})])
     result = await generate_post_drafts(
         "just some standup logistics and small talk",
-        "Casual voice.",
+        seed_voices("Casual voice."),
         client=client,  # type: ignore[arg-type]
         settings=_settings(),
     )
     assert result == ContentResult(postworthy=False, drafts=[])
-    # generate_drafts must be skipped: only the extract call happened.
+    # Drafting must be skipped: only the extract call happened.
     assert len(client.messages.calls) == 1
 
 
 @pytest.mark.asyncio
-async def test_postworthy_produces_drafts() -> None:
-    extract = json.dumps(
-        {
-            "items": [
-                {"summary": "Shipped dark mode", "reason": "A feature launch."},
-                {"summary": "Fixed a race condition", "reason": "Interesting bug fix."},
-            ]
-        }
-    )
-    drafts = json.dumps(
-        {
-            "drafts": [
-                {"text": "Just shipped dark mode."},
-                {"text": "Squashed a nasty race condition today."},
-            ]
-        }
-    )
-    client = FakeClient([extract, drafts])
+async def test_postworthy_produces_one_draft_per_platform() -> None:
+    extract = json.dumps({"items": [{"summary": "Shipped dark mode", "reason": "A launch."}]})
+    # One draft response per platform (seed_voices covers x + linkedin); single-text schema.
+    draft_a = json.dumps({"text": "First-platform take on dark mode."})
+    draft_b = json.dumps({"text": "Second-platform take on dark mode."})
+    client = FakeClient([extract, draft_a, draft_b])
     result = await generate_post_drafts(
-        "we shipped dark mode and fixed a race condition",
-        "Casual voice.",
+        "we shipped dark mode today",
+        seed_voices("Casual voice."),
         client=client,  # type: ignore[arg-type]
         settings=_settings(),
     )
     assert result.postworthy is True
-    assert [d.text for d in result.drafts] == [
-        "Just shipped dark mode.",
-        "Squashed a nasty race condition today.",
-    ]
-    # Both extract and draft calls happened.
-    assert len(client.messages.calls) == 2
+    assert len(result.drafts) == 2
+    assert {d.platform for d in result.drafts} == {"x", "linkedin"}
+    # 1 extract call + 1 draft call per platform.
+    assert len(client.messages.calls) == 3
 
 
 def test_load_voice_reads_file(tmp_path: Path) -> None:
