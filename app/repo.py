@@ -28,6 +28,7 @@ from app.db.models import (
     DraftBatch,
     DraftPlatform,
     DraftStatus,
+    VoiceProfile,
 )
 
 
@@ -246,3 +247,45 @@ async def record_event(
     session.add(event)
     await session.flush()
     return event
+
+
+async def upsert_voice_profile(
+    session: AsyncSession,
+    *,
+    slack_user_id: str,
+    platform: DraftPlatform,
+    sample_posts: list[str],
+    voice_card: str,
+    positioning: str,
+) -> VoiceProfile:
+    """Create or update the user's voice profile for *platform* (one per pair)."""
+    result = await session.execute(
+        select(VoiceProfile).where(
+            VoiceProfile.slack_user_id == slack_user_id,
+            VoiceProfile.platform == platform,
+        )
+    )
+    profile = result.scalar_one_or_none()
+    if profile is None:
+        profile = VoiceProfile(
+            slack_user_id=slack_user_id,
+            platform=platform,
+            sample_posts=sample_posts,
+            voice_card=voice_card,
+            positioning=positioning,
+        )
+        session.add(profile)
+    else:
+        profile.sample_posts = sample_posts
+        profile.voice_card = voice_card
+        profile.positioning = positioning
+    await session.flush()
+    return profile
+
+
+async def get_voice_profiles(session: AsyncSession, slack_user_id: str) -> dict[str, VoiceProfile]:
+    """Return the user's voice profiles keyed by platform value ("x"/"linkedin")."""
+    result = await session.execute(
+        select(VoiceProfile).where(VoiceProfile.slack_user_id == slack_user_id)
+    )
+    return {str(p.platform): p for p in result.scalars().all()}
