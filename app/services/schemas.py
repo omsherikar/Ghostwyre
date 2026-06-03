@@ -6,6 +6,8 @@ extract_postworthy and generate_drafts both produce / consume these models.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel
 
 
@@ -19,6 +21,7 @@ class PostworthyResult(BaseModel):
 
 
 class Draft(BaseModel):
+    platform: Literal["x", "linkedin"] = "x"
     text: str
 
 
