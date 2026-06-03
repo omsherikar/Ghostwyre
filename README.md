@@ -1,17 +1,19 @@
 # Ghostwyre
 
 A Slack-native AI agent. Teach it your voice once with `/setup` (paste a few of
-your real posts), then run `/draft-post` in a channel: Ghostwyre reads the recent
-conversation, decides whether anything is actually worth posting, and drafts a
-long **LinkedIn** post and a long **X** post **in your voice** — each generated in
-its own pass against that platform's voice and strategy, and grounded in what was
-actually said. You can publish the X draft to X with one **Approve** click
-(LinkedIn is copy-paste). The human-in-the-loop approval gate is mandatory;
-nothing is ever auto-posted.
+your real posts), then run `/draft-post` in a channel: Ghostwyre scans the recent
+conversation, **ranks the ideas actually worth posting** — each scored, with the
+real quotes that sparked it — and shows you a shortlist to **pick** from. Pick one
+and it drafts a long **LinkedIn** post and a long **X** post **in your voice** —
+each generated in its own pass against that platform's voice and strategy, grounded
+in what was actually said. You can publish the X draft with one **Approve** click
+(LinkedIn is copy-paste). The human-in-the-loop approval gate is mandatory; nothing
+is ever auto-posted.
 
 It's a small, deliberately-narrow portfolio project that takes one workflow
-end-to-end with production-minded plumbing: async everywhere, a two-step LLM
-pipeline, persisted approval state, and an at-most-once publish gate.
+end-to-end with production-minded plumbing: async everywhere, a multi-step LLM
+pipeline (extract → rank → draft), persisted approval state, and an at-most-once
+publish gate.
 
 ## Demo
 
@@ -27,44 +29,53 @@ flowchart TD
     U([You in Slack]) -->|/draft-post| CMD[commands.py]
     CMD --> ING[ingest.py<br/>fetch · filter · transcript]
     ING --> CON[content.py]
-    CON -->|step A| EX[llm.extract_postworthy<br/>postworthy filter]
+    CON -->|step A| EX[llm.extract_postworthy<br/>postworthy gate]
     EX -->|nothing worth posting| STOP([reply: nothing to post])
-    EX -->|items| GEN[llm.generate_platform_draft<br/>one pass per platform, in your voice]
-    VP[(VoiceProfile<br/>per user · per platform)] -.voice card + exemplars.-> GEN
+    EX -->|candidates| RANK[llm.rank_ideas<br/>score · dedupe · evidence quotes]
+    RANK -->|top ideas| IDEA[blocks.py<br/>ranked-idea card]
+    IDEA -->|chat.postMessage| U
+    U -->|Draft this| ACT[actions.py]
+    ACT -->|pick_idea| GEN[llm.generate_platform_draft<br/>one pass per platform, in your voice]
     SET([You in Slack]) -->|/setup paste your posts| ONB[onboarding.py<br/>distill_voice_profile]
-    ONB --> VP
-    GEN --> DB[(Postgres<br/>repo.create_batch)]
-    DB --> CARD[blocks.py<br/>approval card]
-    CARD -->|chat.postMessage| U
-    U -->|Approve · Regenerate · Cancel| ACT[actions.py]
+    ONB --> VP[(VoiceProfile<br/>per user · per platform)]
+    VP -.voice card + exemplars.-> GEN
+    GEN --> CARD[blocks.py<br/>approval card]
+    CARD -->|chat.update| U
+    U -->|Approve · Regenerate · Cancel| ACT
     ACT -->|Approve only| PUB[publisher<br/>DryRun / XPublisher]
     PUB -->|tweet| X([X / Twitter])
-    ACT -->|audit + status| DB
+    ACT -->|audit + status| DB[(Postgres<br/>candidate_ideas · drafts)]
     U -->|/post-history| CMD
     CMD -->|list_published| DB
 ```
 
-- **Ingest** (`app/slack/ingest.py`) pulls recent messages, drops noise (bots,
-  joins, the bot's own posts), resolves names, and builds a chronological
-  transcript. The transcript is treated as confidential — never logged.
+- **Ingest** (`app/slack/ingest.py`) pulls recent messages (up to `IDEA_SCAN_LIMIT`),
+  drops noise (bots, joins, the bot's own posts), resolves names, and builds a
+  chronological transcript. The transcript is treated as confidential — never logged.
 - **Voice** (`app/slack/onboarding.py` → `llm.distill_voice_profile`) — `/setup`
   opens a modal where you paste a few of your real X and LinkedIn posts plus what
   you want to be known for; Ghostwyre distills a per-platform **voice card** +
   positioning and stores them as a `VoiceProfile` per `(user, platform)`. Users
   without a profile fall back to the static `voice.md` seed, so the flow works
   before onboarding.
-- **Generate** (`app/services/content.py` → `llm.py`) runs a *postworthy filter*
-  that can short-circuit with "nothing to post", then drafts **one long post per
-  platform** — a separate LLM pass each, fed only that platform's voice card,
-  positioning, strategy, and a few of your real posts as exemplars (picked by
-  lightweight relevance), grounded in the actual transcript (not a lossy summary).
-  Structured JSON output + prompt caching on the system prompt and voice card.
-  Works on Claude or Groq.
+- **Find the idea** (`app/services/content.py` → `llm.{extract_postworthy,rank_ideas}`)
+  — a cheap *postworthy gate* can short-circuit with "nothing to post"; otherwise
+  `rank_ideas` scores every candidate (novelty, specificity, audience value, "would
+  you proudly share this"), **merges near-duplicates**, and attaches the real
+  transcript quotes that sparked each. The top `IDEA_SHORTLIST_SIZE` are posted as a
+  **ranked-idea card** — making "we filtered the channel down to *these*" visible —
+  and you click **Draft this** on the one you want. (A channel with one clear idea
+  skips the picker and drafts it immediately.)
+- **Generate** (`llm.generate_platform_draft`) — for the chosen idea, drafts **one
+  long post per platform** in a separate LLM pass each, fed only that platform's
+  voice card, positioning, strategy, and a few of your real posts as exemplars
+  (lightweight relevance), grounded in the actual transcript. Structured JSON output
+  + prompt caching on the system prompt and voice card. Works on Claude or Groq.
 - **Approve** (`app/slack/{blocks,actions}.py`) persists the batch first, posts one
   living Block Kit card (each draft labelled by platform), and resolves every
   button by id. Approve appears only for the **X** draft within `X_CHAR_LIMIT`;
-  LinkedIn (and over-limit X) is copy-paste. Regenerate re-runs generation, Cancel
-  dismisses — each idempotent.
+  LinkedIn (and over-limit X) is copy-paste. Regenerate re-drafts the same chosen
+  idea, Cancel dismisses — each idempotent.
 - **Publish** (`app/services/publisher.py`, `x_publisher.py`) is a `PublisherClient`
   Protocol: `DryRunPublisher` by default, `XPublisher` (tweepy) when `PUBLISHER=x`.
 

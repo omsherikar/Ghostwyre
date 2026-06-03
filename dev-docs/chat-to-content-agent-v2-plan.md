@@ -80,7 +80,7 @@ Learns from **your real posts** (RAG few-shot + memory, not tone sliders) · **p
 
 ## Phasing (independently shippable)
 - **v2.0 — ✅ SHIPPED** (Pillars A + B). `/setup` onboarding modal → `distill_voice_profile` → a `VoiceProfile` per `(slack_user_id, platform)`; per-platform strategy in `app/platforms.py`; generation refactored to **one LLM pass per platform** (`generate_platform_draft`) fed that platform's voice card + positioning + strategy + a few of the user's real posts as exemplars (lightweight token-overlap selection, no embeddings yet); `/draft-post` + **Regenerate** wired to the invoker's voice, falling back to the `voice.md` seed when no profile exists. Exemplar count via `VOICE_EXEMPLAR_COUNT`. *(Biggest perceived-quality jump; drafts finally sound like the user.)*
-- **v2.1** — Multi-stage idea ranking with evidence + the "pick the idea" UI.
+- **v2.1 — ✅ SHIPPED** (Pillar C). `/draft-post` scans a larger window (`IDEA_SCAN_LIMIT`), runs the cheap `extract_postworthy` gate, then `rank_ideas` scores/dedupes/orders the candidates and attaches verbatim transcript quotes as evidence; the top `IDEA_SHORTLIST_SIZE` are shown as an in-channel **ranked-idea card** (score + why + quotes) with a **Draft this** button per idea. Picking one (`pick_idea`) drafts it per platform in your voice; a single clear idea auto-drafts. Ideas persist on the batch (`candidate_ideas` JSON + `chosen_idea_index`, `selecting` status); Regenerate re-drafts the chosen idea. Evidence = quoted snippets (no map-reduce chunking or vector RAG yet — deferred). *(Makes "we filtered the channel down to the one worth posting" visible.)*
 - **v2.2** — Feedback memory loop (edits/approvals refine voice + ranking).
 
 ## Risks / open questions
