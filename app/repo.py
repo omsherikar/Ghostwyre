@@ -248,6 +248,19 @@ async def set_draft_status(
     await session.flush()
 
 
+async def set_draft_text(
+    session: AsyncSession,
+    draft_id: uuid.UUID,
+    text: str,
+) -> None:
+    """Replace a single draft's text in place (a user's edit); raise LookupError if missing."""
+    draft = await session.get(Draft, draft_id)
+    if draft is None:
+        raise LookupError(f"Draft {draft_id} not found")
+    draft.text = text
+    await session.flush()
+
+
 async def set_batch_status(
     session: AsyncSession,
     batch_id: uuid.UUID,

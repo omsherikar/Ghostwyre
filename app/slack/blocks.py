@@ -37,6 +37,11 @@ REGENERATE_ACTION_ID = "regenerate_draft"
 CANCEL_ACTION_ID = "cancel_batch"
 PICK_ACTION_ID = "pick_idea"
 REOPEN_ACTION_ID = "reopen_ideas"
+EDIT_ACTION_ID = "edit_draft"
+
+# Slack `plain_text_input` caps `initial_value` at 3000 chars; stay safely under so
+# `views_open` never rejects a pre-filled edit modal. Longer drafts are copy-paste-only.
+EDIT_MAX_LEN = 2900
 
 
 def _encode_value(**fields: str) -> str:
@@ -97,6 +102,15 @@ def _regenerate_button(batch: DraftBatch, draft: Draft) -> dict[str, Any]:
     }
 
 
+def _edit_button(batch: DraftBatch, draft: Draft) -> dict[str, Any]:
+    return {
+        "type": "button",
+        "action_id": EDIT_ACTION_ID,
+        "text": {"type": "plain_text", "text": "Edit"},
+        "value": _encode_value(b=str(batch.id), d=str(draft.id)),
+    }
+
+
 def _cancel_button(batch: DraftBatch) -> dict[str, Any]:
     return {
         "type": "button",
@@ -147,6 +161,12 @@ def _pending_draft_blocks(
         blocks.append(
             _context("Too long to auto-publish — copy & paste, or raise X_CHAR_LIMIT (X Premium).")
         )
+    # Edit lets the user tweak the draft before approving (and teaches the voice).
+    # Skip it for drafts too long for Slack's modal input — copy-paste those instead.
+    if len(draft.text) <= EDIT_MAX_LEN:
+        elements.append(_edit_button(batch, draft))
+    else:
+        blocks.append(_context("Too long to edit in Slack — copy-paste to tweak it."))
     elements.append(_regenerate_button(batch, draft))
     elements.append(_cancel_button(batch))
     blocks.append(

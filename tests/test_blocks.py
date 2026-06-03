@@ -73,14 +73,14 @@ def test_returns_list_of_dicts_for_pending_2_draft_batch() -> None:
     assert all(isinstance(b, dict) for b in blocks)
 
 
-def test_each_draft_actions_block_has_three_buttons() -> None:
+def test_each_draft_actions_block_has_four_buttons() -> None:
     batch = _batch([_draft(0, "alpha"), _draft(1, "beta")])
     blocks = build_draft_blocks(batch)
     actions = _actions_blocks(blocks)
     assert len(actions) == 2
     for ab in actions:
         ids = _button_action_ids(ab)
-        assert ids == ["approve_draft", "regenerate_draft", "cancel_batch"]
+        assert ids == ["approve_draft", "edit_draft", "regenerate_draft", "cancel_batch"]
 
 
 def test_approve_and_regenerate_values_carry_draft_and_batch_ids() -> None:
@@ -129,7 +129,7 @@ def test_linkedin_draft_is_copy_only_no_approve() -> None:
     blocks = build_draft_blocks(batch)
     ids = _button_action_ids(_actions_blocks(blocks)[0])
     assert "approve_draft" not in ids  # no LinkedIn publisher — copy-only
-    assert ids == ["regenerate_draft", "cancel_batch"]
+    assert ids == ["edit_draft", "regenerate_draft", "cancel_batch"]
     assert "copy & paste into linkedin" in _rendered_text(blocks).lower()
 
 
@@ -140,7 +140,8 @@ def test_over_limit_x_draft_drops_approve_keeps_regen_and_cancel() -> None:
     assert len(actions) == 1
     ids = _button_action_ids(actions[0])
     assert "approve_draft" not in ids
-    assert ids == ["regenerate_draft", "cancel_batch"]
+    # Still editable (well under the modal limit), so Edit stays alongside regen/cancel.
+    assert ids == ["edit_draft", "regenerate_draft", "cancel_batch"]
     assert "too long to auto-publish" in _rendered_text(blocks).lower()
 
 
@@ -158,6 +159,25 @@ def test_long_x_draft_publishable_when_limit_raised() -> None:
     ids = _button_action_ids(_actions_blocks(blocks)[0])
     assert "approve_draft" in ids
     assert "characters" in _rendered_text(blocks)
+
+
+def test_edit_button_carries_batch_and_draft_ids() -> None:
+    d0 = _draft(0, "alpha")
+    batch = _batch([d0])
+    by_id = {
+        el["action_id"]: el for el in _actions_blocks(build_draft_blocks(batch))[0]["elements"]
+    }
+    assert json.loads(by_id["edit_draft"]["value"]) == {"b": str(batch.id), "d": str(d0.id)}
+
+
+def test_very_long_draft_drops_edit_button() -> None:
+    from app.slack.blocks import EDIT_MAX_LEN
+
+    batch = _batch([_draft(0, "z" * (EDIT_MAX_LEN + 1), platform=DraftPlatform.x)])
+    blocks = build_draft_blocks(batch, x_char_limit=25000)
+    ids = _button_action_ids(_actions_blocks(blocks)[0])
+    assert "edit_draft" not in ids  # too long for Slack's modal input
+    assert "too long to edit in slack" in _rendered_text(blocks).lower()
 
 
 def test_cancelled_batch_single_section_no_actions() -> None:
