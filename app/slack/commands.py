@@ -111,7 +111,7 @@ def register(app: AsyncApp) -> None:
                     draft_texts=[d.text for d in result.drafts],
                 )
                 batch_id = batch.id
-                blocks = build_draft_blocks(batch)
+                blocks = build_draft_blocks(batch, x_char_limit=settings.x_char_limit)
                 text = fallback_text(batch)
 
         logger.info("draft_post_persisted", channel=channel, draft_count=len(result.drafts))

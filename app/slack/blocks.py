@@ -21,7 +21,15 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from app.db.models import ApprovalEvent, BatchStatus, Draft, DraftBatch, DraftStatus
+from app.db.models import (
+    ApprovalEvent,
+    BatchStatus,
+    Draft,
+    DraftBatch,
+    DraftPlatform,
+    DraftStatus,
+)
+from app.platforms import PLATFORMS
 from app.services.publisher import MAX_TWEET_LEN
 
 APPROVE_ACTION_ID = "approve_draft"
@@ -95,29 +103,46 @@ def _cancel_button(batch: DraftBatch) -> dict[str, Any]:
     }
 
 
-def _pending_draft_blocks(batch: DraftBatch, draft: Draft) -> list[dict[str, Any]]:
-    """Render one pending-batch slot: divider, section, char-count, actions."""
-    slot_label = f"*Draft {draft.slot_index + 1}*"
+def _pending_draft_blocks(
+    batch: DraftBatch, draft: Draft, x_char_limit: int
+) -> list[dict[str, Any]]:
+    """Render one pending draft: divider, platform-labelled section, char count,
+    and platform-appropriate actions.
+
+    Approve appears only for a *publishable* platform (X) whose draft is within the
+    effective limit (`x_char_limit`, raisable for X Premium). LinkedIn and
+    over-limit X drafts are copy-paste only. Regenerate/Cancel always show.
+    """
+    spec = PLATFORMS[str(draft.platform or DraftPlatform.x)]
+    label = f"*{spec.label} draft*"
     blocks: list[dict[str, Any]] = [_divider()]
 
     if draft.status == DraftStatus.regenerating:
         # Placeholder — don't render the stale text, and offer no buttons.
-        blocks.append(_section(f"{slot_label}\n_Regenerating…_"))
+        blocks.append(_section(f"{label}\n_Regenerating…_"))
         return blocks
 
+    blocks.append(_section(f"{label}\n{draft.text}"))
+
     char_count = len(draft.text)
-    over_limit = char_count > MAX_TWEET_LEN
+    # X's limit is configurable (Premium); other platforms use the registry value.
+    limit = x_char_limit if spec.key == "x" else spec.char_limit
+    over_limit = char_count > limit
 
-    blocks.append(_section(f"{slot_label}\n{draft.text}"))
-
-    count_line = f"{char_count} / {MAX_TWEET_LEN} characters"
+    count_line = f"{char_count} characters"
     if over_limit:
-        count_line += " — too long to publish"
+        count_line += f" — over the {spec.label} limit ({limit})"
     blocks.append(_context(count_line))
 
     elements: list[dict[str, Any]] = []
-    if not over_limit:
+    if spec.publishable and not over_limit:
         elements.append(_approve_button(batch, draft))
+    elif not spec.publishable:
+        blocks.append(_context(f"Copy & paste into {spec.label} — no auto-publish."))
+    else:  # publishable (X) but over the limit
+        blocks.append(
+            _context("Too long to auto-publish — copy & paste, or raise X_CHAR_LIMIT (X Premium).")
+        )
     elements.append(_regenerate_button(batch, draft))
     elements.append(_cancel_button(batch))
     blocks.append(
@@ -130,12 +155,15 @@ def _pending_draft_blocks(batch: DraftBatch, draft: Draft) -> list[dict[str, Any
     return blocks
 
 
-def build_draft_blocks(batch: DraftBatch) -> list[dict[str, Any]]:
+def build_draft_blocks(
+    batch: DraftBatch, *, x_char_limit: int = MAX_TWEET_LEN
+) -> list[dict[str, Any]]:
     """Build the Block Kit blocks for *batch* from its current attributes.
 
-    Pure: reads `batch.status` and `batch.drafts` only. Returns ONLY the blocks
-    list — the caller pairs it with `fallback_text(batch)` for the top-level
-    `text` field when posting/updating.
+    Pure: reads `batch.status` and `batch.drafts` only. `x_char_limit` is the
+    effective X approve/publish ceiling (callers pass `settings.x_char_limit`).
+    Returns ONLY the blocks list — the caller pairs it with `fallback_text(batch)`
+    for the top-level `text` field when posting/updating.
     """
     if batch.status in (BatchStatus.cancelled, BatchStatus.expired):
         return [
@@ -165,7 +193,7 @@ def build_draft_blocks(batch: DraftBatch) -> list[dict[str, Any]]:
         ),
     ]
     for draft in drafts:
-        blocks.extend(_pending_draft_blocks(batch, draft))
+        blocks.extend(_pending_draft_blocks(batch, draft, x_char_limit))
     return blocks
 
 

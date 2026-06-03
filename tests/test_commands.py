@@ -24,7 +24,7 @@ import pytest
 from slack_sdk.errors import SlackApiError
 
 from app import repo
-from app.db.models import BatchStatus, DraftStatus
+from app.db.models import BatchStatus, DraftPlatform, DraftStatus
 from app.services.content import ContentResult
 from app.services.schemas import Draft
 from app.slack import commands
@@ -62,6 +62,7 @@ class FakeDraftRow:
         self.slot_index = slot_index
         self.text = text
         self.status = DraftStatus.pending
+        self.platform = DraftPlatform.x
 
 
 class FakeBatch:
