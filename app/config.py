@@ -29,6 +29,9 @@ class Settings(BaseSettings):
         default=None, description="Channel /draft-post reads from"
     )
     message_fetch_limit: int = Field(default=50, description="How many recent messages to pull")
+    # How many recent messages /draft-post scans when finding + ranking ideas. Larger
+    # than message_fetch_limit so it can sift a busy channel down to the few worth posting.
+    idea_scan_limit: int = Field(default=150, description="Messages scanned for idea ranking")
 
     # --- LLM (Phase 2) ---
     # Which provider services/llm.py talks to. "anthropic" (default) uses Claude;
